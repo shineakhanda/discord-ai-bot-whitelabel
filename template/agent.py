@@ -381,7 +381,10 @@ FAKE_ACTION = re.compile(
     r"i will (now )?(go|move|proceed|head) to)", re.I)
 CANT_RE = re.compile(r"(can'?t|cannot|unable to|not able to|don'?t have (the )?(ability|access)|no (direct )?access|"
                      r"parchi na|parini|pari na|ক্ষমতা নেই|পারছি না|পারি না|সম্ভব না).{0,60}"
-                     r"(brows|access|read|open|scrap|scan|see|load|ব্রাউজ|সাইট|ওয়েব|website|site|page|link)", re.I | re.S)
+                     r"(brows|access|read|open|scrap|scan|see|load|ব্রাউজ|সাইট|ওয়েব|website|site|page|link)|"
+                     r"(website|site|page|scan|brows|data).{0,80}(korte parchi na|parchi na|parini|can'?t|cannot|"
+                     r"unable)|static html|only (see|read) (the )?(static|html)|browsing tool.{0,40}(only|shudhu)",
+                     re.I | re.S)
 CANT_NOTE = ("You DID open the page with your browser in this reply — its real content is in the Tool result above. "
              "Never say you can't browse. Answer from that content: list what's there (products, prices, info). If the "
              "specific thing isn't in it, say it isn't on that page and suggest the exact page/section to check.")
