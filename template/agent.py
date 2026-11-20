@@ -198,6 +198,93 @@ async def t_skill(ctx, a):
     ctx.loaded_skills.add(name)
     return Result(f"Skill '{name}' loaded. Follow it:\n{body}")
 
+CHAN_MENTION = re.compile(r"<#(\d{15,21})>")
+
+def _norm(x):
+    return re.sub(r"[^a-z0-9\u0980-\u09ff]+", "", (x or "").lower())
+
+def find_channel(guild, ref):
+    """<#id>, id, #name or name (emoji / separators ignored) -> text channel or None."""
+    if guild is None:
+        return None
+    m = CHAN_MENTION.search(ref or "") or re.fullmatch(r"\s*(\d{15,21})\s*", ref or "")
+    if m:
+        ch = guild.get_channel_or_thread(int(m.group(1)))
+        return ch if hasattr(ch, "history") else None
+    want = _norm(ref)
+    if not want:
+        return None
+    chans = [c for c in guild.text_channels] + list(getattr(guild, "threads", []))
+    for c in chans:
+        if _norm(c.name) == want:
+            return c
+    for c in chans:
+        if want in _norm(c.name):
+            return c
+    return None
+
+def can_read(ch, member):
+    me = ch.guild.me
+    try:
+        ok_me = ch.permissions_for(me).read_message_history and ch.permissions_for(me).view_channel
+        ok_user = ch.permissions_for(member).view_channel if hasattr(member, "roles") else False
+    except Exception:
+        return False
+    return ok_me and ok_user
+
+async def channel_dump(ch, limit=60, chars=9000):
+    lines = await channel_lines(ch, limit, cap=1500)
+    text = "\n".join(lines)
+    return text[-chars:] if len(text) > chars else text
+
+@tool("channel", "channel | <#channel or name> | <messages 5-100, optional>",
+      "read another channel of this server (prices, plans, rules, FAQ, announcements, logs)",
+      when=lambda c: c.gid is not None, progress="📖 Reading **{0}**…")
+async def t_channel(ctx, a):
+    ch = find_channel(ctx.guild, a[0])
+    if not ch:
+        names = ", ".join(f"#{c.name}" for c in ctx.guild.text_channels
+                          if can_read(c, ctx.user))[:900]
+        return Result(f"No channel '{a[0]}' found. Channels you can read: {names}")
+    if not can_read(ch, ctx.user):
+        return Result(f"#{ch.name}: either I or this user can't see that channel, so I can't read it.")
+    n = max(5, min(100, int(re.sub(r"\D", "", a[1]) or 60))) if len(a) > 1 and a[1] else 60
+    try:
+        text = await channel_dump(ch, n)
+    except discord.HTTPException:
+        return Result(f"Couldn't read #{ch.name} (missing Read Message History permission?).")
+    return Result(f"Messages in #{ch.name} (oldest first):\n{text or '(empty)'}", f"📖 read #{ch.name}")
+
+# ---------- info channels: always-known server pages (pricing, rules, FAQ) ----------
+_info_cache = {}          # channel id -> (time, text)
+INFO_TTL = 300
+
+def info_invalidate(cid):
+    _info_cache.pop(cid, None)
+
+async def info_text(guild, member=None, budget=7000):
+    ids = store.guild(guild.id).get("info_channels") or []
+    if not ids:
+        return ""
+    out = []
+    for cid in ids:
+        ch = guild.get_channel_or_thread(cid)
+        if not ch or not hasattr(ch, "history"):
+            continue
+        if member is not None and hasattr(member, "roles") and not ch.permissions_for(member).view_channel:
+            continue
+        hit = _info_cache.get(cid)
+        if not hit or time.time() - hit[0] > INFO_TTL:
+            try:
+                hit = (time.time(), await channel_dump(ch, 50, 6000))
+            except discord.HTTPException:
+                hit = (time.time(), "")
+            _info_cache[cid] = hit
+        if hit[1]:
+            out.append(f"## #{ch.name}\n{hit[1]}")
+    text = "\n\n".join(out)
+    return text[:budget]
+
 def _server_admin(c):
     from core import is_admin
     return bool(c.gid and is_admin(c.user))
@@ -216,8 +303,9 @@ async def t_learn(c, a):
     if any(fact.lower() == l.lstrip("- ").lower() for l in lines):
         return Result("Already known.")
     new = "\n".join(lines + [f"- {fact}"])
-    if len(new) > 1500:
-        return Result("Server info is full (1500 chars). Ask an admin to tidy it with /setup knowledge.")
+    if len(new) > 4000:
+        return Result("Server info is full (4000 chars). Ask an admin to tidy it with /setup knowledge, "
+                      "or add a channel with /setup infochannels.")
     g["knowledge"] = new
     store.save_guild(c.gid)
     return Result(f"Learned: {fact}", "🧠 learned about the server")
@@ -258,17 +346,31 @@ def add_person(people, member):
         if n and len(n) >= 2:
             people[n.lower()] = member.id
 
-async def channel_lines(channel, limit, before=None, skip=(), people=None):
+def embed_text(e, cap=1500):
+    """Everything readable in an embed: title, description, fields, footer."""
+    bits = [e.title or "", e.description or ""]
+    bits += [f"{f.name}: {f.value}" for f in e.fields]
+    if e.footer and e.footer.text:
+        bits.append(e.footer.text)
+    return " | ".join(b.strip() for b in bits if b and b.strip())[:cap]
+
+def message_text(m, cap=500):
+    body = EMOJI_RE.sub(r"\1", m.clean_content or "")[:cap]
+    if m.attachments:
+        body += " " + " ".join(f"[{a.content_type.split('/')[0] if a.content_type else 'file'}]"
+                               for a in m.attachments[:3])
+    for e in m.embeds[:3]:
+        t = embed_text(e, cap)
+        if t:
+            body += ("\n" if body.strip() else "") + "[embed] " + t
+    return body
+
+async def channel_lines(channel, limit, before=None, skip=(), people=None, cap=500):
     lines = []
     async for m in channel.history(limit=limit, before=before):
         if people is not None:
             add_person(people, m.author)
-        body = EMOJI_RE.sub(r"\1", m.clean_content or "")[:200]
-        if m.attachments:
-            body += " " + " ".join(f"[{a.content_type.split('/')[0] if a.content_type else 'file'}]"
-                                   for a in m.attachments[:3])
-        if not body.strip() and m.embeds:
-            body = (m.embeds[0].title or m.embeds[0].description or "")[:200]
+        body = message_text(m, cap)
         line = f"{m.author.display_name}{' (__BOT_NAME__)' if m.author.id == client.user.id else ''}: {body.strip()}"
         if body.strip() and line not in skip:
             lines.append(line)
@@ -348,7 +450,8 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
         gid=ctx.gid, text=text, user_name=user.display_name, is_owner=is_owner(user), roles=roles,
         profile=store.profile(user.id), facts=[t for _, t in store.mem_list(user.id)],
         tool_lines=[f"`{t.usage}` — {t.desc}" for t in tools_now], place=_place(ctx), auto_channel=ctx.auto,
-        ticket=ctx.ticket, mentionable=sorted({n for n in ctx.people if n != user.display_name.lower()})[:12])
+        ticket=ctx.ticket, mentionable=sorted({n for n in ctx.people if n != user.display_name.lower()})[:12],
+        info=await info_text(ctx.guild, user) if ctx.gid and ctx.guild else "")
     msgs = [_note(system), *ai.history(key)]
     if recent:
         msgs.append(_note("Recent messages in this channel before the user's message (context, oldest first):\n"
@@ -368,6 +471,21 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
             steps.append(res.label)
         urls.extend(res.urls)
         return res
+
+    # channels mentioned in the message (#pricing) are read straight away
+    if ctx.gid and ctx.guild and "channel" in names:
+        info_ids = set(store.guild(ctx.gid).get("info_channels") or [])
+        done = 0
+        for cid in dict.fromkeys(CHAN_MENTION.findall(text)):
+            if done >= 2:
+                break
+            if int(cid) in info_ids or (ctx.channel and int(cid) == ctx.channel.id):
+                continue
+            ch = ctx.guild.get_channel_or_thread(int(cid))
+            if ch and hasattr(ch, "history"):
+                await show(TOOLS["channel"], ch.name)
+                msgs.append(_note(f"Tool result (channel):\n{(await act('channel', cid)).text}"))
+                done += 1
 
     # links in the message are opened straight away; explicit "search …" runs straight away
     links = [u.rstrip(").,!?>]'\"") for u in web.URL_RE.findall(text)]

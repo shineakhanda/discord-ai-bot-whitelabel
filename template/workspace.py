@@ -156,7 +156,7 @@ def lang_hint(text):
 
 # ---------- prompt ----------
 def build_prompt(*, gid, text, user_name, is_owner, roles, profile, facts, tool_lines, place, auto_channel,
-                 ticket=False, extra_rules="", mentionable=()):
+                 ticket=False, extra_rules="", mentionable=(), info=""):
     parts = [read(f) for f in BOOT_FILES]
     parts.append(LANGUAGE)
 
@@ -199,7 +199,12 @@ def build_prompt(*, gid, text, user_name, is_owner, roles, profile, facts, tool_
         parts.append(focus(g.get("type", "general")))
         if g["knowledge"] and (ticket or g["knowledge_scope"] == "all"):
             parts.append("# This server's info from its admins (trust it for questions about this server)\n"
-                         + g["knowledge"][:1500])
+                         + g["knowledge"][:4000])
+        if info:
+            parts.append("# This server's info channels (live copy of channels like pricing, plans, rules, FAQ)\n"
+                         "These are the real current posts. Use them for any question about prices, plans, rules or "
+                         "how things work here; quote prices exactly as written, never invent or round them. "
+                         "If the answer isn't here, say so and point to the right channel or a ticket.\n\n" + info)
         lang_rule = LANG_RULES.get(g["lang"], "")
     if ticket:
         parts.append("# Ticket mode\nYou are first-line support in a support ticket. Follow skill `ticket-support` "

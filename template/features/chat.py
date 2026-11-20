@@ -87,6 +87,8 @@ async def on_message(msg: discord.Message):
     if msg.author.id == client.user.id:
         return
     gid = msg.guild.id if msg.guild else None
+    if gid:
+        agent.info_invalidate(msg.channel.id)          # info channels (pricing…) refresh on new posts
     if gid and msg.author.bot:
         await tickets.maybe_open_ticket(msg)
     if msg.author.bot or blocked(msg.author, gid):

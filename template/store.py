@@ -57,14 +57,14 @@ CONFIG_FILE = os.path.join(DATA, "config.json")
 DEFAULTS = {
     "model": env("DEFAULT_MODEL", "nvidia/nemotron-3-ultra-550b-a55b:free"),
     "fallbacks": [m.strip() for m in env("FALLBACK_MODELS").split(",") if m.strip()],
-    "max_tokens": 400,
+    "max_tokens": 1200,
     "temperature": 0.7,
-    "max_turns": 8,
+    "max_turns": 12,
     "think": "off",
     "hedge": float(env("SWITCH_AFTER", "20") or 20),   # seconds a model may stay silent before the next one is asked (0 = wait)
     "vision_model": env("VISION_MODEL"),      # used for photos if the main model can't see images
     "audio_model": env("AUDIO_MODEL"),        # used for voice messages if the main model can't hear
-    "history_lines": 6,                       # recent channel messages __BOT_NAME__ reads for context (0 = off)
+    "history_lines": 10,                      # recent channel messages __BOT_NAME__ reads for context (0 = off)
     "smart_model": env("SMART_MODEL"),        # stronger model for admin jobs, tickets, long questions, translation
     "human_delay": True,                      # short "typing" pause before replies, feels more human
     "human_split": True,                      # short multi-paragraph replies go out as 2-3 messages
@@ -110,6 +110,16 @@ def _deep_merge(dst, src):
     return dst
 
 cfg = _load_cfg()
+
+# one-time upgrades of old saved settings (config.json keeps old values forever otherwise)
+if cfg.get("cfg_version", 1) < 2:
+    cfg["max_tokens"] = max(cfg.get("max_tokens", 0), 1200)      # 400 cut answers short and squeezed the layout
+    cfg["max_turns"] = max(cfg.get("max_turns", 0), 12)
+    cfg["history_lines"] = max(cfg.get("history_lines", 0), 10)
+    cfg["cfg_version"] = 2
+    _save_cfg_quiet = True
+else:
+    _save_cfg_quiet = False
 
 def _switch_provider():
     """When the main AI provider changes (e.g. OpenRouter -> numes.ai), pick a model that exists there.
@@ -187,6 +197,7 @@ GUILD_DEFAULTS = {
     "features": {"chat": True, "search": True, "browse": True, "panel": True, "tickets": True},
     "knowledge": "",                     # admin-written server info, used in answers
     "knowledge_scope": "all",            # all | tickets
+    "info_channels": [],                 # channel ids the bot always reads (pricing, rules, FAQ…), /setup infochannels
     "tickets": {"enabled": False, "roles": [], "category": None, "handoff": True},
     # key = client API key (ptlc_), app_key = application API key (ptla_), both encrypted
     "panel": {"url": "", "key": "", "app_key": "", "role": None, "admin_role": None, "console": False,
@@ -230,6 +241,8 @@ CREATE INDEX IF NOT EXISTS mem_user ON memories (user_id);
 CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, channel_id INTEGER,
                                       guild_id INTEGER, due REAL, text TEXT);
 CREATE INDEX IF NOT EXISTS rem_due ON reminders (due);
+CREATE TABLE IF NOT EXISTS chat_ctx (key INTEGER, ts REAL, role TEXT, content TEXT);
+CREATE INDEX IF NOT EXISTS chat_ctx_key ON chat_ctx (key, ts);
 """)
 db.commit()
 
@@ -352,7 +365,7 @@ def decrypt(token):
         return ""
 
 # ---------- user memories (facts users ask __BOT_NAME__ to remember) ----------
-MAX_MEMORIES = 15
+MAX_MEMORIES = 40
 MEM_LEN = 200
 
 def mem_list(uid):
@@ -559,3 +572,30 @@ def close_db():
 
 # shared aiohttp session (set by bot on startup)
 HTTP = {"s": None}
+
+
+# ---------- conversation memory (survives restarts / updates) ----------
+def ctx_load(key, since, limit):
+    rows = db.execute("SELECT ts, role, content FROM chat_ctx WHERE key=? AND ts>=? ORDER BY ts DESC, rowid DESC "
+                      "LIMIT ?", (key, since, limit)).fetchall()
+    return list(reversed(rows))
+
+def ctx_add(key, ts, role, content):
+    db.execute("INSERT INTO chat_ctx (key, ts, role, content) VALUES (?, ?, ?, ?)", (key, ts, role, content[:6000]))
+    db.commit()
+
+def ctx_clear(key):
+    db.execute("DELETE FROM chat_ctx WHERE key=?", (key,))
+    db.commit()
+
+def ctx_prune(before):
+    db.execute("DELETE FROM chat_ctx WHERE ts<?", (before,))
+    db.commit()
+
+if _save_cfg_quiet:
+    try:
+        save_cfg()
+        log.info("settings upgraded: answer length %s tokens, %s chat turns, %s context lines",
+                 cfg["max_tokens"], cfg["max_turns"], cfg["history_lines"])
+    except Exception as e:
+        log.warning("config upgrade save failed: %s", e)

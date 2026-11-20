@@ -29,7 +29,7 @@ def provider_name():
 
 # what the main (non-OpenRouter) provider's models accept, e.g. AI_INPUTS=text,image,audio
 DECLARED_INPUTS = {m.strip() for m in (env("AI_INPUTS") or "text").split(",") if m.strip()}
-CTX_TTL = 2 * 60 * 60
+CTX_TTL = 12 * 60 * 60               # conversation memory per channel (saved in the database)
 
 TOOL_RE = re.compile(r"^[\s`*>_]*TOOL[\s*_]*:[\s*_]*([a-z_]+)[\s*_]*(?:\|\s*(.*))?$", re.I)
 
@@ -48,24 +48,37 @@ def parse_tool(reply):
     return None
 
 # =====================================================================
-# chat memory (per channel, 2h)
+# chat memory (per channel, 12h, survives restarts)
 # =====================================================================
 ctx = defaultdict(lambda: deque(maxlen=cfg["max_turns"] * 2))
 
+def _q(key):
+    if key not in ctx:
+        import store
+        ctx[key].extend(store.ctx_load(key, time.time() - CTX_TTL, cfg["max_turns"] * 2))
+    return ctx[key]
+
 def history(key):
-    q = ctx[key]
+    q = _q(key)
     cutoff = time.time() - CTX_TTL
     while q and q[0][0] < cutoff:
         q.popleft()
     return [{"role": r, "content": c} for _, r, c in q]
 
 def remember(key, user_line, reply):
-    q = ctx[key]
-    q.append((time.time(), "user", user_line))
-    q.append((time.time(), "assistant", reply))
+    import store
+    q, now = _q(key), time.time()
+    for role, text in (("user", user_line), ("assistant", reply)):
+        q.append((now, role, text))
+        try:
+            store.ctx_add(key, now, role, text)
+        except Exception as e:
+            log.warning("chat memory save failed: %s", e)
 
 def forget(key):
+    import store
     ctx.pop(key, None)
+    store.ctx_clear(key)
 
 def resize_ctx():
     n = cfg["max_turns"] * 2
@@ -79,6 +92,11 @@ def prune_ctx():
         q = ctx[k]
         if not q or q[-1][0] < cutoff:
             del ctx[k]
+    try:
+        import store
+        store.ctx_prune(cutoff)
+    except Exception:
+        pass
 
 # =====================================================================
 # model capabilities (image / audio input)

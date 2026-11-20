@@ -98,7 +98,7 @@ async def setup_feature(inter: discord.Interaction,
 
 class KnowledgeModal(discord.ui.Modal, title="Server info for __BOT_NAME__"):
     text = discord.ui.TextInput(label="Rules, IP, FAQ, links, prices...", style=discord.TextStyle.paragraph,
-                                max_length=1500, required=False)
+                                max_length=4000, required=False)
 
     def __init__(self, gid, scope):
         super().__init__()
@@ -120,6 +120,38 @@ async def setup_knowledge(inter: discord.Interaction, scope: Optional[Literal["a
     if not await _admin(inter):
         return
     await inter.response.send_modal(KnowledgeModal(inter.guild_id, scope))
+
+@setup_grp.command(name="infochannels", description="Channels __BOT_NAME__ always reads (pricing, plans, rules, FAQ)")
+@app_commands.describe(action="add / remove a channel, or list them", channel="The channel (e.g. #pricing)")
+async def setup_infochannels(inter: discord.Interaction, action: Literal["add", "remove", "list"],
+                             channel: Optional[discord.TextChannel] = None):
+    if not await _admin(inter):
+        return
+    import agent
+    g = store.guild(inter.guild_id)
+    ids = g.setdefault("info_channels", [])
+    if action == "list" or channel is None:
+        txt = "\n".join(f"• <#{c}>" for c in ids) or "None yet. Add one: `/setup infochannels add #pricing`"
+        return await inter.response.send_message(f"**Info channels** (__BOT_NAME__ always knows what's in them):\n{txt}",
+                                                 ephemeral=True)
+    if action == "add":
+        if channel.id not in ids:
+            if len(ids) >= 6:
+                return await inter.response.send_message("Max 6 info channels. Remove one first.", ephemeral=True)
+            me = inter.guild.me
+            if not (channel.permissions_for(me).view_channel and channel.permissions_for(me).read_message_history):
+                return await inter.response.send_message(
+                    f"I can't read {channel.mention}. Give me **View Channel** + **Read Message History** there.",
+                    ephemeral=True)
+            ids.append(channel.id)
+        msg = f"✅ I'll always read {channel.mention} (refreshed every few minutes)."
+    else:
+        if channel.id in ids:
+            ids.remove(channel.id)
+        msg = f"✅ Removed {channel.mention}."
+    agent.info_invalidate(channel.id)
+    store.save_guild(inter.guild_id)
+    await inter.response.send_message(msg, ephemeral=True)
 
 @setup_grp.command(name="tickets", description="AI first-line support inside tickets from your ticket bot")
 @app_commands.describe(enabled="Turn ticket support on/off", role="Support role your ticket bot pings (toggle add/remove)",
