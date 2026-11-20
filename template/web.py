@@ -99,6 +99,8 @@ class _Text(HTMLParser):
         self.out, self.skip, self.title, self._in_title = [], 0, "", False
 
     def handle_starttag(self, tag, attrs):
+        if tag in ("del", "s", "strike"):
+            self.out.append(" (was ")
         if tag in self.SKIP:
             self.skip += 1
         elif tag == "title":
@@ -109,6 +111,8 @@ class _Text(HTMLParser):
             self.out.append("## ")
 
     def handle_endtag(self, tag):
+        if tag in ("del", "s", "strike"):
+            self.out.append(") ")
         if tag in self.SKIP and self.skip:
             self.skip -= 1
         elif tag == "title":
@@ -129,6 +133,7 @@ def html_to_text(html):
     return p.title.strip(), squeeze("".join(p.out))
 
 def squeeze(text):
+    text = re.sub(r"~~\s*([^~\n]{1,40}?)\s*~~", r"(was \1)", text or "")    # struck-out old prices -> "(was $1.50)"
     text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)            # markdown images
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)         # markdown links -> text
     text = re.sub(r"[ \t\r\f\v]+", " ", text)

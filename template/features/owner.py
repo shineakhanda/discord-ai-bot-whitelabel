@@ -27,7 +27,7 @@ OWNER_HELP = (
     f"`{PREFIX}premium <guild_id> on|off` · `{PREFIX}block|unblock <user>` · `{PREFIX}blockguild|unblockguild <id>`\n"
     f"`{PREFIX}memory [add <rule>|del <n>|clear]` standing instructions (workspace/MEMORY.md)\n"
     f"`{PREFIX}soul` · `{PREFIX}skills` · `{PREFIX}reload` workspace files (SOUL/AGENTS/TOOLS/skills)\n"
-    f"`{PREFIX}info [question]` what the bot reads from info channels · `{PREFIX}version` running code version · `{PREFIX}backup` back up the database now\n"
+    f"`{PREFIX}site [words]` learned websites + what it would answer from · `{PREFIX}info [question]` what the bot reads from info channels · `{PREFIX}version` running code version · `{PREFIX}backup` back up the database now\n"
     f"`{PREFIX}presence streaming [twitch url]` · `{PREFIX}statustext add|del|every` bot status\n"
     f"`{PREFIX}serverlog` every server + invite links (public or allowed) → CSV\n"
     f"`{PREFIX}smart <model|off>` stronger model for hard jobs · `{PREFIX}vision <model|off>` · `{PREFIX}audio <model|off>` · `{PREFIX}caps [model]` · `{PREFIX}history <n>`\n"
@@ -38,7 +38,7 @@ OWNER_CMDS = {"ohelp", "model", "fallback", "tokens", "temp", "turns", "think", 
               "limits", "limit", "usercap", "premium", "block", "unblock", "blockguild", "unblockguild",
               "pause", "resume", "resetall", "status", "servers", "leave", "sync",
               "memory", "smart", "vision", "audio", "caps", "history", "clearcache", "cleancommands", "reload", "soul", "version", "backup", "presence", "statustext", "serverlog",
-              "skills", "info"}
+              "skills", "info", "site"}
 
 def _id(arg):
     m = re.search(r"\d{15,21}", arg or "")
@@ -250,6 +250,28 @@ async def owner_cmd(msg, cmd, arg):
         store.save_cfg()
         await presence.apply()
         return await send("**Status texts:**\n" + "\n".join(f"`{i}.` {t}" for i, t in enumerate(p.get("texts", []), 1)))
+    if cmd == "site":
+        if not msg.guild:
+            return await send("Use this in a server.")
+        from features import sitebrain as sb
+        rows = sb.sites(msg.guild.id)
+        if not rows:
+            return await send("No website learned yet. Say: `scan <website> and save it`.")
+        head = " · ".join(f"**{h}** {n} pages" for h, n, _ in rows)
+        if not arg:
+            n = store.db.execute("SELECT COUNT(*) FROM site_items WHERE guild_id=?", (msg.guild.id,)).fetchone()[0]
+            return await send(f"{head} · {n} products indexed. `{PREFIX}site <words>` shows what I'd answer from.")
+        items = sb.item_matches(msg.guild.id, arg)
+        lines = [f"• {n} — **{p}** <{u}>" for n, p, u, _ in items] or ["(no product name matches)"]
+        snips = []
+        for url, text in store.db.execute("SELECT url, text FROM site_pages WHERE guild_id=?", (msg.guild.id,)):
+            i = text.lower().find(arg.lower())
+            if i >= 0:
+                snips.append(f"<{url}>\n`{text[max(0, i - 60): i + 120].replace('`', '').replace(chr(10), ' / ')}`")
+            if len(snips) >= 3:
+                break
+        return await send((f"{head}\n**Products matching “{arg}”:**\n" + "\n".join(lines)
+                           + ("\n**In saved pages:**\n" + "\n".join(snips) if snips else ""))[:1950])
     if cmd == "info":
         if not msg.guild:
             return await send("Use this in a server.")

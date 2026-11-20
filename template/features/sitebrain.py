@@ -35,7 +35,10 @@ PRICE_RE = re.compile(r"(?:[$৳€£₹]\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)
 NOT_NAME = re.compile(r"^(total|subtotal|price|sale|from|only|save|discount|was|now|regular|starting|per|each|add to cart|"
                       r"buy now|in stock|out of stock|sold out|qty|quantity|home|cart|\W*)$", re.I)
 
+OLD_PRICE = re.compile(r"~~[^~]*~~|\(was [^)]*\)", re.I)
+
 def _clean(line):
+    line = OLD_PRICE.sub(" ", line)                     # crossed-out old prices are not the price
     line = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", line)
     line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
     return re.sub(r"[#*_>`|•\-–—]+", " ", line).strip()

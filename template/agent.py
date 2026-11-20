@@ -378,7 +378,9 @@ FAKE_ACTION = re.compile(
     r"(saved|stored|added) (it |this |them |all )?(to|in) (my )?memory|updated my (memory|notes)|deep scan|"
     r"i('m| am) (now )?(accessing|reading|scanning|parsing|reviewing|checking|moving|going|proceeding|processing|"
     r"extracting|retrieving)|give me a (moment|minute|sec)|one moment|bear with me|please wait|"
-    r"i will (now )?(go|move|proceed|head) to)", re.I)
+    r"i will (now )?(go|move|proceed|head) to|get back to you|let me (double-)?check|i'?ll (check|look into) (it|this|that)|"
+    r"ek ?(minute|min|second|sec|muhurto) (darao|daran|wait|opekkha)|check kore (bolchi|janacchi|jabo)|"
+    r"dekhe (bolchi|janacchi|dicchi)|ekhon(i)? check kor|অপেক্ষা করুন|এক মিনিট|দেখে বলছি)", re.I)
 CANT_RE = re.compile(r"(can'?t|cannot|unable to|not able to|don'?t have (the )?(ability|access)|no (direct )?access|"
                      r"parchi na|parini|pari na|ক্ষমতা নেই|পারছি না|পারি না|সম্ভব না).{0,60}"
                      r"(brows|access|read|open|scrap|scan|see|load|ব্রাউজ|সাইট|ওয়েব|website|site|page|link)|"
