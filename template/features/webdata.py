@@ -262,3 +262,26 @@ async def watch_remove(inter: discord.Interaction, watch_id: int):
     await inter.response.send_message("🗑️ Removed." if n else "No such watch.", ephemeral=True)
 
 tree.add_command(watch_grp)
+
+
+# ---------------------------------------------------------------- page screenshots
+@tool("screenshot", "screenshot | <url>",
+      "take a picture of a web page (after its JavaScript loads) and post it; also lets you see pages that have "
+      "no readable text", when=lambda c: feature(c.gid, "browse") if c.gid else True,
+      progress="📸 Taking a screenshot of **{0}**…")
+async def t_screenshot(c, a):
+    m = web.URL_RE.search(a[0] if a else "")
+    if not m:
+        return Result("Give me a link to screenshot.")
+    if c.gid and not store.quota(c.gid, c.user.id, "browse"):
+        return Result("Today's browsing limit for this server is used up.")
+    try:
+        final, png = await web.screenshot(m.group())
+    except web.BlockedURL:
+        return Result("That address isn't allowed (private or local network).")
+    except Exception as e:
+        return Result(f"Couldn't take a screenshot: {e}")
+    f = discord.File(io.BytesIO(png), filename=f"{_slug(final)}.png")
+    c.after_send.append((f"📸 <{final}>", None, {"file": f}))
+    return Result(f"Screenshot of {final} taken and attached below your reply. Describe what's on it only if asked "
+                  f"or if it helps answer.", "📸 screenshot")

@@ -20,10 +20,15 @@ except Exception:
 
 UA = "Mozilla/5.0 (compatible; __BOT_NAME__Bot/1.0; +https://discord.com)"
 ALLOW_PRIVATE = {h.strip().lower() for h in env("ALLOW_PRIVATE_HOSTS").split(",") if h.strip()}
-PAGE_CHARS = 3500          # page text sent to the AI (~900 tokens)
+PAGE_CHARS = 9000          # page text sent to the AI (~2.5k tokens)
 URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.I)
 
 # ---------- SSRF guard ----------
+PAGE_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/131.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9,bn;q=0.8"}
+
 class BlockedURL(Exception):
     pass
 
@@ -57,7 +62,7 @@ async def safe_get(url, max_bytes=1_500_000, ports=(80, 443)):
     """GET with manual redirects, each hop checked. Returns (final_url, content_type, text)."""
     for _ in range(5):
         await check_url(url, ports)
-        async with HTTP["s"].get(url, allow_redirects=False, headers={"User-Agent": UA},
+        async with HTTP["s"].get(url, allow_redirects=False, headers=PAGE_HEADERS,
                                  timeout=aiohttp.ClientTimeout(total=20)) as r:
             if r.status in (301, 302, 303, 307, 308) and r.headers.get("Location"):
                 url = urljoin(url, r.headers["Location"])
@@ -179,14 +184,94 @@ async def _run_lp(args, timeout):
         raise RuntimeError("page took too long")
     return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
-async def _lightpanda(url):
+LP_WAITS = [["--wait-until", "networkidle"], ["--wait-ms", "5000"], []]   # first one this build accepts is kept
+_lp_wait = {"i": None}
+
+async def _lightpanda(url, dump="markdown"):
+    """Run the page's JavaScript and wait until it has loaded its data, then dump it."""
     async with _lp_sem:
-        code, out, err = await _run_lp(["fetch", "--dump", "markdown", *LP_FLAGS, url], 30)
-        if code != 0 and LP_FLAGS:                       # older/newer builds: retry without extra flags
-            code, out, err = await _run_lp(["fetch", "--dump", "markdown", url], 30)
-        if code != 0 or not out.strip():
-            raise RuntimeError(f"browser failed: {err.strip()[-150:]}")
-        return out
+        order = [_lp_wait["i"]] if _lp_wait["i"] is not None else range(len(LP_WAITS))
+        last = ""
+        for i in order:
+            for flags in (LP_FLAGS, []) if LP_FLAGS else ([],):
+                code, out, err = await _run_lp(["fetch", "--dump", dump, *LP_WAITS[i], *flags, url], 40)
+                if code == 0 and out.strip():
+                    if _lp_wait["i"] is None:
+                        _lp_wait["i"] = i
+                        log.info("Lightpanda waits with: %s", " ".join(LP_WAITS[i]) or "(default)")
+                    return out
+                last = err.strip()[-150:]
+        raise RuntimeError(f"browser failed: {last}")
+
+# ---------- backup reader: a real Chrome in the cloud (Jina Reader) ----------
+JINA_KEY = env("JINA_API_KEY")
+
+async def _jina(url):
+    """r.jina.ai renders the page in headless Chrome and returns markdown. Free without a key (low rate)."""
+    hdr = {"X-Return-Format": "markdown", "X-Timeout": "25", "X-With-Links-Summary": "false",
+           "User-Agent": PAGE_HEADERS["User-Agent"]}
+    if JINA_KEY:
+        hdr["Authorization"] = f"Bearer {JINA_KEY}"
+    async with HTTP["s"].get("https://r.jina.ai/" + url, headers=hdr,
+                             timeout=aiohttp.ClientTimeout(total=40)) as r:
+        if r.status != 200:
+            raise RuntimeError(f"reader returned {r.status}")
+        md = await r.text(errors="replace")
+    md = re.sub(r"^(URL Source|Published Time|Warning):.*$", "", md, flags=re.M)
+    m = re.search(r"^Title:\s*(.+)$", md, re.M)
+    title = m.group(1).strip() if m else ""
+    md = re.sub(r"^Title:.*$", "", md, flags=re.M).replace("Markdown Content:", "").strip()
+    return title, md
+
+# ---------- data hidden in the HTML (Next.js, Nuxt, JSON-LD, meta tags) ----------
+def embedded_data(html, limit=6000):
+    """Many JavaScript sites ship their content as JSON inside the page. Pull the readable parts out."""
+    import json as _json
+    out = []
+    for k in ("og:title", "og:description", "description", "og:price:amount", "product:price:amount",
+              "og:price:currency", "twitter:description"):
+        m = re.search(r'<meta[^>]+(?:property|name)=["\']%s["\'][^>]+content=["\']([^"\']+)' % re.escape(k), html, re.I)
+        if m:
+            out.append(f"{k}: {m.group(1)}")
+    blobs = re.findall(r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.S | re.I)
+    for sid in ("__NEXT_DATA__", "__NUXT_DATA__"):
+        blobs += re.findall(r'<script[^>]+id=["\']%s["\'][^>]*>(.*?)</script>' % sid, html, re.S)
+    blobs += re.findall(r"window\.__(?:INITIAL_STATE|APOLLO_STATE|PRELOADED_STATE|NUXT)__\s*=\s*(\{.*?\});?\s*</script>",
+                        html, re.S)
+
+    def walk(x, path, acc, depth=0):
+        if len(acc) > 400 or depth > 12:
+            return
+        if isinstance(x, dict):
+            for k, v in x.items():
+                if k.startswith(("_", "@context")) or k in ("buildId", "runtimeConfig", "locales", "query"):
+                    continue
+                walk(v, f"{path}.{k}" if path else k, acc, depth + 1)
+        elif isinstance(x, list):
+            for i, v in enumerate(x[:60]):
+                walk(v, f"{path}[{i}]", acc, depth + 1)
+        elif isinstance(x, (str, int, float)) and not isinstance(x, bool):
+            v = str(x).strip()
+            if v and len(v) < 400 and not re.match(r"^(https?:|/|data:|[a-f0-9-]{20,}$)", v):
+                acc.append(f"{path.split('.')[-1]}: {v}")
+    for b in blobs[:6]:
+        try:
+            data = _json.loads(b.strip().rstrip(";"))
+        except Exception:
+            continue
+        acc = []
+        walk(data, "", acc)
+        out.extend(acc)
+    text = "\n".join(dict.fromkeys(out))
+    return text[:limit]
+
+SHELL_RE = re.compile(r"enable javascript|javascript is (required|disabled)|you need to enable|loading\.\.\.|"
+                      r"please wait|checking your browser|just a moment|verify you are human|access denied", re.I)
+
+def looks_empty(text):
+    """An app shell, a bot check, or almost nothing: try the next reader."""
+    t = (text or "").strip()
+    return len(t) < 400 or (len(t) < 2500 and bool(SHELL_RE.search(t)))
 
 def browser_name():
     return "Lightpanda" if LP["path"] else "HTTP reader"
@@ -194,33 +279,59 @@ def browser_name():
 _page_cache = {}
 
 async def read_page(url):
-    """Returns (title, text) of a public web page, trimmed for the AI."""
+    """Returns (title, text) of a public web page, trimmed for the AI.
+    Lightpanda (runs JavaScript, waits for data) -> real Chrome reader -> data hidden in the HTML -> plain HTTP."""
+    title, text = await _read_any(url)
+    return title, text[:PAGE_CHARS]
+
+async def _read_any(url, limit=60000):
     url = url.rstrip(").,!?>")
     hit = _page_cache.get(url)
     if hit and time.time() - hit[0] < 900:
         return hit[1], hit[2]
-    title, text = "", ""
+    url = await final_url(url)                         # also blocks private / local addresses
+    title, text, how = "", "", ""
     if LP["path"]:
         try:
-            md = await _lightpanda(await final_url(url))
-            text = squeeze(md)
+            md = await _lightpanda(url)
             m = re.search(r"^#\s+(.+)$", md, re.M)
-            title = m.group(1).strip() if m else ""
+            title, text, how = (m.group(1).strip() if m else ""), squeeze(md), "browser"
         except BlockedURL:
             raise
         except Exception as e:
             log.warning("lightpanda failed for %s: %s", url, e)
-    if not text:
-        _, ctype, body = await safe_get(url)
-        if "html" in ctype or "<html" in body[:500].lower():
-            title, text = html_to_text(body)
-        elif ctype.startswith("text/") or "json" in ctype:
-            text = squeeze(body)
-        else:
-            raise RuntimeError("that link isn't a readable web page")
-    if not text:
-        raise RuntimeError("the page had no readable text")
-    text = text[:PAGE_CHARS]
+    html = ""
+    if looks_empty(text):
+        try:
+            _, ctype, body = await safe_get(url, max_bytes=3_000_000)
+            if "html" in ctype or "<html" in body[:500].lower():
+                html = body
+                t2, x2 = html_to_text(body)
+                extra = embedded_data(body)
+                x2 = (x2 + ("\n\n[data in the page]\n" + extra if extra else "")).strip()
+                if len(x2) > len(text):
+                    title, text, how = t2 or title, x2, "html+data" if extra else "html"
+            elif ctype.startswith("text/") or "json" in ctype:
+                text, how = squeeze(body), "text"
+            elif not text:
+                raise RuntimeError("that link isn't a readable web page")
+        except BlockedURL:
+            raise
+        except RuntimeError as e:
+            if "readable" in str(e):
+                raise
+            log.info("plain read failed for %s: %s", url, e)
+    if looks_empty(text):
+        try:
+            t3, x3 = await _jina(url)
+            if len(squeeze(x3)) > len(text):
+                title, text, how = t3 or title, squeeze(x3), "cloud browser"
+        except Exception as e:
+            log.info("cloud reader failed for %s: %s", url, e)
+    if not text.strip():
+        raise RuntimeError("the page had no readable text (it may need a login or block bots)")
+    log.info("read %s via %s (%d chars)", url[:80], how or "?", len(text))
+    text = text[:limit]
     _page_cache[url] = (time.time(), title, text)
     if len(_page_cache) > 100:
         _page_cache.pop(next(iter(_page_cache)))
@@ -262,28 +373,65 @@ class _Tables(HTMLParser):
             self.cell.append(data)
 
 async def read_raw(url, limit=60000):
-    """Full page content (JavaScript run by Lightpanda when available) as markdown-ish text with tables kept.
-    Returns (final_url, title, text)."""
+    """Full page content (JavaScript run, tables kept) for data extraction. Returns (final_url, title, text)."""
     url = await final_url(url.rstrip(").,!?>"))
     if LP["path"]:
         try:
             md = await _lightpanda(url)
-            m = re.search(r"^#\s+(.+)$", md, re.M)
-            return url, (m.group(1).strip() if m else ""), md[:limit]
+            if not looks_empty(squeeze(md)):
+                m = re.search(r"^#\s+(.+)$", md, re.M)
+                return url, (m.group(1).strip() if m else ""), md[:limit]
         except BlockedURL:
             raise
         except Exception as e:
             log.warning("lightpanda raw failed for %s: %s", url, e)
-    _, ctype, body = await safe_get(url, max_bytes=3_000_000)
-    if "html" in ctype or "<html" in body[:500].lower():
-        title, text = html_to_text(body)
-        t = _Tables()
+    tables = ""
+    try:
+        _, ctype, body = await safe_get(url, max_bytes=3_000_000)
+        if "html" in ctype or "<html" in body[:500].lower():
+            t = _Tables()
+            try:
+                t.feed(body)
+            except Exception:
+                pass
+            tables = "\n\n".join(t.tables)
+    except Exception:
+        pass
+    _page_cache.pop(url, None)
+    title, text = await _read_any(url, limit)
+    return url, title, ((tables + "\n\n") if tables else "") + text[:limit]
+
+async def screenshot(url):
+    """PNG of a public page (after its JavaScript ran). Returns (final_url, png_bytes)."""
+    url = await final_url(url.rstrip(").,!?>"))
+    if LP["path"]:
         try:
-            t.feed(body)
-        except Exception:
-            pass
-        return url, title, ("\n\n".join(t.tables) + "\n\n" + text)[:limit]
-    return url, "", body[:limit]
+            async with _lp_sem:
+                proc = await asyncio.create_subprocess_exec(
+                    LP["path"], "fetch", "--dump", "png", *(LP_WAITS[_lp_wait["i"] or 0]), url,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                out, _ = await asyncio.wait_for(proc.communicate(), 45)
+            if out[:8] == b"\x89PNG\r\n\x1a\n":
+                return url, out
+        except Exception as e:
+            log.info("lightpanda screenshot failed: %s", e)
+    hdr = {"X-Return-Format": "screenshot", "X-Timeout": "25"}
+    if JINA_KEY:
+        hdr["Authorization"] = f"Bearer {JINA_KEY}"
+    async with HTTP["s"].get("https://r.jina.ai/" + url, headers=hdr, timeout=aiohttp.ClientTimeout(total=45)) as r:
+        body = await r.read()
+        if r.status != 200:
+            raise RuntimeError(f"screenshot service returned {r.status}")
+    if body[:8] == b"\x89PNG\r\n\x1a\n":
+        return url, body
+    m = re.search(rb"https://\S+?\.(?:png|jpe?g|webp)", body)
+    if not m:
+        raise RuntimeError("no screenshot returned")
+    async with HTTP["s"].get(m.group().decode(), timeout=aiohttp.ClientTimeout(total=30)) as r:
+        img = await r.read()
+    if len(img) < 1000:
+        raise RuntimeError("screenshot was empty")
+    return url, img
 
 # ---------- web search ----------
 def engine_ok(name):
