@@ -159,6 +159,9 @@ def clean(text):
     if len(parts) > 1:
         text = parts[-1]
     text = re.sub(rf"^\s*<{THINK_TAGS}>.*\Z", "", text, flags=re.S | re.I)   # reply cut off mid-thought
+    text = re.sub(r"<\|?/?(?:channel|start_of_turn|end_of_turn|turn)\|?>", "", text)   # stray Gemma control tokens
+    text = re.sub(r"(?:\n\s*(?:-{3,}|\*{3,}))?\s*\n\s*thoughts?\s*:?\s*\Z", "", text, flags=re.I)  # "--- thought" tail
+    text = re.sub(r"\A\s*thoughts?\s*\n", "", text, flags=re.I)                     # "thought" head line
     return text.strip()
 
 # How each provider wants thinking switched off/on. Tried in order; the first one the provider

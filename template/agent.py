@@ -325,6 +325,10 @@ async def info_text(guild, member=None, budget=20000, text="", force=False):
     return "\n\n".join(out)[:budget + 2000]
 
 MAX_INFO = 15
+LOOKBACK_WORDS = re.compile(r"channel|them|those|these|ota|egula|oigula|sob", re.I)
+RULE_SAVE = re.compile(r"\b(?:save|remember|note|learn|memori[sz]e|mone rakh\w*|rekhe dao)\b[^:\n]{0,40}?"
+                       r"(?:rules?|info|this|these|that|policy|policies|instructions?|facts?)?\s*:\s*(.{10,})",
+                       re.I | re.S)
 SAVE_WORDS = re.compile(r"save|remember|memory|memorize|note|learn|store|mone rakh|mone rekh|rakh|rekhe dao|"
                         r"info ?channel|মনে রাখ|সেভ", re.I)
 BARE_ID = re.compile(r"(?<![\d<#@&])(\d{17,20})(?!\d)")
@@ -515,7 +519,8 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     pre_steps, pre_notes = [], []
     refs = referenced_channels(ctx, text) if ctx.gid and ctx.guild else []
     save_ask = bool(ctx.gid and ctx.guild and _server_admin(ctx) and SAVE_WORDS.search(text))
-    if save_ask and not refs:              # "save it" about channels given a few messages ago
+    # "save them / save those channels" about channels given a few messages ago (short follow-ups only)
+    if save_ask and not refs and len(text) < 90 and LOOKBACK_WORDS.search(text) and not RULE_SAVE.search(text):
         for m in reversed(ai.history(key)):
             if m["role"] == "user" and isinstance(m["content"], str):
                 refs = referenced_channels(ctx, m["content"])
@@ -531,20 +536,47 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
             for c in added:
                 info_invalidate(c.id)
             pre_steps.append(f"📌 saved {len(added)} info channel{'s' if len(added) > 1 else ''}")
-        pre_notes.append("These channels are now saved as info channels (the code did it, it's real): "
-                         + ", ".join(f"#{c.name}" for c in refs if c.id in ids)
-                         + ". Their content is in your info section. Confirm briefly, then answer from that data.")
+            pre_notes.append("These channels were just saved as info channels by the code (real): "
+                             + ", ".join(f"#{c.name}" for c in added)
+                             + ". Confirm in one short line. Answer any other question in the message from the data.")
+        else:
+            pre_notes.append("Those channels were already saved as info channels. Say so in one short line.")
+    elif save_ask and not refs:            # "save these rules: 1) … 2) …" -> server info, done by the code
+        m = RULE_SAVE.search(text)
+        if m:
+            facts = [f.strip(" -•.;") for f in re.split(r"\n+|\s(?=\d[).]\s)|;\s*", m.group(1)) if len(f.strip()) > 8]
+            facts = [re.sub(r"^\d[).]\s*", "", f)[:300] for f in facts][:8]
+            saved = []
+            for f in facts:
+                res = await run_tool(ctx, "learn_server", f)
+                if res.text.startswith("Learned"):
+                    saved.append(f)
+            if saved:
+                pre_steps.append(f"🧠 saved {len(saved)} server rule{'s' if len(saved) > 1 else ''}")
+                pre_notes.append("The code just saved these to this server's info (real, permanent):\n"
+                                 + "\n".join(f"- {f}" for f in saved)
+                                 + "\nConfirm in one short line in the user's language. Follow them from now on.")
     system = workspace.build_prompt(
         gid=ctx.gid, text=text, user_name=user.display_name, is_owner=is_owner(user), roles=roles,
         profile=store.profile(user.id), facts=[t for _, t in store.mem_list(user.id)],
         tool_lines=[f"`{t.usage}` — {t.desc}" for t in tools_now], place=_place(ctx), auto_channel=ctx.auto,
         ticket=ctx.ticket, mentionable=sorted({n for n in ctx.people if n != user.display_name.lower()})[:12],
-        info=await info_text(ctx.guild, user, text=text, force=ctx.ticket or bool(pre_notes))
-        if ctx.gid and ctx.guild else "")
+        info="")
+    info = await info_text(ctx.guild, user, text=text, force=ctx.ticket or bool(pre_notes)) \
+        if ctx.gid and ctx.guild else ""
+    if info:
+        log.info("info channels for this message: %d chars", len(info))
     msgs = [_note(system), *ai.history(key)]
     if recent:
         msgs.append(_note("Recent messages in this channel before the user's message (context, oldest first):\n"
                           + "\n".join(recent)))
+    if info:
+        loaded = info.startswith("## ")
+        msgs.append(_note(
+            ("SERVER DATA — live copy of this server's info channels (pricing, plans, rules). This is real, current "
+             "data you already have; answer from it. Quote names, specs and prices exactly as written (same currency). "
+             "Never invent or change prices. If the answer truly isn't here, say which channel to check.\n\n"
+             if loaded else "") + info))
     steps, urls = list(pre_steps), []
     for n in pre_notes:
         msgs.append(_note(n))
