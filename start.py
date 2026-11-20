@@ -56,7 +56,26 @@ def render():
                 shutil.copy2(src, dst)
     return values
 
+def ensure_packages():
+    """Fresh server / PC: install the bot's Python packages once."""
+    try:
+        import discord, aiohttp  # noqa: F401
+        return
+    except ImportError:
+        pass
+    import subprocess
+    req = os.path.join(ROOT, "requirements.txt")
+    if not os.path.exists(req):
+        req = os.path.join(TPL, "requirements.txt")
+    print("[start] installing Python packages (first start only)...", flush=True)
+    cmd = [sys.executable, "-m", "pip", "install", "-U", "-r", req]
+    if os.path.isdir("/home/container"):            # Pterodactyl / Pelican / Reviactyl
+        cmd[4:4] = ["--prefix", ".local"]
+    subprocess.run(cmd, stdin=subprocess.DEVNULL)
+    os.execv(sys.executable, [sys.executable] + sys.argv)  # restart so the new packages load
+
 if __name__ == "__main__":
+    ensure_packages()
     load_env(os.path.join(ROOT, ".env"))
     os.environ.setdefault("DATA_DIR", os.path.join(ROOT, "data"))
     v = render()

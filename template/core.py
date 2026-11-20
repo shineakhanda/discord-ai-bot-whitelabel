@@ -25,7 +25,7 @@ def on_startup(fn):
     _startup_tasks.append(fn)
     return fn
 
-class __BOT_NAME__(discord.Client):
+class BotClient(discord.Client):
     def __init__(self):
         super().__init__(intents=intents, max_messages=None, allowed_mentions=discord.AllowedMentions.none())
         self.tree = app_commands.CommandTree(self)
@@ -46,7 +46,7 @@ class __BOT_NAME__(discord.Client):
             await store.HTTP["s"].close()
         store.close_db()                 # flush the database cleanly on stop/restart (no data loss)
 
-client = __BOT_NAME__()
+client = BotClient()
 tree = client.tree
 
 # ---------- permissions ----------
