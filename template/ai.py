@@ -301,6 +301,13 @@ async def _ask_one(model, messages, max_tokens, temperature=None):
         raise err
     if not text and fin == "length":
         text, fin = await _call(model, messages, min(max_tokens * 4, 3000), style, temperature)
+    if not text and fin != "length":
+        # Google sometimes turns a tool description into a broken native function call, or sends nothing back:
+        # one quick retry on the same (fast) model beats switching to a slower one
+        log.info("%s: empty reply (finish %s), retrying once", model, fin)
+        retry = messages + [{"role": "user", "content": "[bot system] Reply in plain text now. To use a tool, write "
+                                                        "only the line `TOOL: <name> | <input>`."}]
+        text, fin = await _call(model, retry, max_tokens, style, 0.5)
     if not text:
         raise APIError(0, f"empty reply (finish={fin})")
     return text
