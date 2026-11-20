@@ -375,6 +375,11 @@ FAKE_ACTION = re.compile(
     r"i('m| am) (now )?(accessing|reading|scanning|parsing|reviewing|checking|moving|going|proceeding|processing|"
     r"extracting|retrieving)|give me a (moment|minute|sec)|one moment|bear with me|please wait|"
     r"i will (now )?(go|move|proceed|head) to)", re.I)
+ROLE_SLIP = re.compile(r"you can (respond|reply|say|answer)|here are (some|a few|\d) (options|ways|replies|responses)|"
+                       r"\boption [1-3]\b|which one fits|depending on how you want|you could (reply|respond|say)|"
+                       r"it looks like you are continuing|if you (want|wish) to (reply|respond)|suggested repl", re.I)
+ROLE_NOTE = ("You replied as if you were helping someone write a message, with options. Wrong: YOU are the member they "
+             "are talking to. Reply to them directly yourself, in one short natural message, same language. No options.")
 FAKE_ACTION_NOTE = ("STOP. You just claimed to do something (save, read, scan, check, go somewhere, 'one moment') "
                     "but you used NO tool, so nothing happened. You can only act with tools, and only inside this "
                     "reply — there is no 'later'. Now either call the right tool (one line: `TOOL: <name> | <input>`, "
@@ -704,6 +709,11 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
                                             ("hear audio" if "audio" in media[2] else "")) if x)
             msgs.append(_note(f"The user attached {', '.join(media[3])}, but your current AI model can't {cant}. "
                               "Tell them briefly, and that the bot owner can enable a model that supports it."))
+    me = getattr(client.user, "display_name", None) or "the bot"
+    msgs.append(_note(f"You are {me}, a member of this Discord chat, replying to {user.display_name} yourself, in first "
+                      "person, in their language and tone. Answer them directly like a friend/staff member would — "
+                      "never write suggested replies or 'options' for them to send, never describe the conversation "
+                      "from the outside. Small talk gets a short natural reply."))
     msgs.append({"role": "user", "content": content})
 
     heavy = any(t.heavy for t in tools_now)
@@ -713,6 +723,7 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     reply = None
     tools_used = len(steps)                 # channels read / saved by the code count as real actions
     grounding_left = 1
+    role_fixed = False
     fallback_reply = None                   # a good-enough answer kept while a re-check runs
     for step in range(max_steps + 3):
         if fallback_reply is None:
@@ -733,6 +744,12 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
                 log.info("caught a claimed-but-not-done action, asking again")
                 msgs += [{"role": "assistant", "content": reply}, _check(FAKE_ACTION_NOTE)]
                 tools_used = -1                     # only once
+                fallback_reply = fallback_reply or reply
+                continue
+            if not role_fixed and step <= max_steps and ROLE_SLIP.search(reply):
+                role_fixed = True
+                log.info("reply slipped out of character, asking again")
+                msgs += [{"role": "assistant", "content": reply}, _check(ROLE_NOTE)]
                 fallback_reply = fallback_reply or reply
                 continue
             if grounding_left and step <= max_steps:
