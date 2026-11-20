@@ -35,7 +35,7 @@ TOOL_RE = re.compile(r"^[\s`*>_]*TOOL[\s*_]*:[\s*_]*([a-z_]+)[\s*_]*(?:\|\s*(.*)
 
 def parse_tool(reply):
     """('name', 'input') if the model asked for a tool, else None."""
-    for line in reply.strip().splitlines()[:3]:
+    for line in reply.strip().splitlines()[:12]:
         line = line.strip().strip("`").strip()
         if not line:
             continue
@@ -44,7 +44,6 @@ def parse_tool(reply):
             return m.group(1).lower(), (m.group(2) or "").strip().strip("`")
         if line.upper().startswith("SEARCH:"):            # legacy format
             return "search", line.split(":", 1)[1].strip()
-        return None
     return None
 
 # =====================================================================

@@ -136,8 +136,8 @@ async def setup_infochannels(inter: discord.Interaction, action: Literal["add", 
                                                  ephemeral=True)
     if action == "add":
         if channel.id not in ids:
-            if len(ids) >= 6:
-                return await inter.response.send_message("Max 6 info channels. Remove one first.", ephemeral=True)
+            if len(ids) >= 15:
+                return await inter.response.send_message("Max 15 info channels. Remove one first.", ephemeral=True)
             me = inter.guild.me
             if not (channel.permissions_for(me).view_channel and channel.permissions_for(me).read_message_history):
                 return await inter.response.send_message(

@@ -201,7 +201,9 @@ async def t_skill(ctx, a):
 CHAN_MENTION = re.compile(r"<#(\d{15,21})>")
 
 def _norm(x):
-    return re.sub(r"[^a-z0-9\u0980-\u09ff]+", "", (x or "").lower())
+    import unicodedata
+    x = unicodedata.normalize("NFKC", x or "").lower()
+    return re.sub(r"[^a-z0-9\u0980-\u09ff]+", "", x)
 
 def find_channel(guild, ref):
     """<#id>, id, #name or name (emoji / separators ignored) -> text channel or None."""
@@ -262,28 +264,92 @@ INFO_TTL = 300
 def info_invalidate(cid):
     _info_cache.pop(cid, None)
 
-async def info_text(guild, member=None, budget=7000):
+INFO_TOPIC = re.compile(
+    r"price|pricing|plan|package|cost|rate|offer|discount|charge|fee|bill|pay|bkash|nagad|rocket|card|crypto|buy|order|"
+    r"purchase|renew|kinbo|kinte|kinmu|nibo|koto|dam|taka|tk\b|৳|\$|usd|bdt|vps|rdp|vds|dedicated|bare ?metal|host|"
+    r"domain|minecraft|mc\b|wordpress|reseller|xeon|epyc|ryzen|intel|amd|ram|cpu|core|ssd|nvme|storage|bandwidth|"
+    r"location|stock|available|rule|policy|refund|faq|how to|kivabe|ki ki|কত|দাম|টাকা|প্ল্যান|কিনব", re.I)
+
+SYNONYMS = {"intel": "xeon", "amd": "epyc ryzen", "mc": "minecraft", "wp": "wordpress", "dedi": "dedicated",
+            "bdix": "bdix", "germany": "german", "bd": "bd", "domain": "domain", "reseller": "reseller",
+            "web": "hosting", "cpanel": "hosting", "game": "minecraft"}
+
+def _pick_channels(chans, text):
+    """Channels whose names match words in the question (intel -> xeon …). None matched -> all of them."""
+    words = set()
+    for w in re.findall(r"[a-zA-Z]{2,}", unicodedata_nfkc(text).lower()):
+        words.add(w)
+        words.update(SYNONYMS.get(w, "").split())
+    words -= {"the", "and", "for", "price", "prices", "plan", "plans", "koto", "dam", "tell", "what", "all", "our",
+              "now", "me", "you", "ki", "er", "show", "list", "give", "about", "package", "packages", "in", "is"}
+    hit = [c for c in chans if any(len(w) >= 2 and w in _norm(c.name) for w in words)]
+    return hit or chans
+
+def unicodedata_nfkc(x):
+    import unicodedata
+    return unicodedata.normalize("NFKC", x or "")
+
+async def _info_body(ch, per):
+    hit = _info_cache.get(ch.id)
+    if not hit or time.time() - hit[0] > INFO_TTL or hit[2] < per:
+        try:
+            hit = (time.time(), await channel_dump(ch, 50, per), per)
+        except discord.HTTPException:
+            hit = (time.time(), "", per)
+        _info_cache[ch.id] = hit
+    return hit[1][-per:]
+
+async def info_text(guild, member=None, budget=20000, text="", force=False):
+    """Live copy of the server's info channels. Loaded when the message is about prices/plans/rules (or in
+    tickets): the channels matching the question in full, the rest by name. Otherwise only the names."""
     ids = store.guild(guild.id).get("info_channels") or []
-    if not ids:
+    chans = [c for c in (guild.get_channel_or_thread(i) for i in ids) if c is not None and hasattr(c, "history")]
+    if member is not None and hasattr(member, "roles"):
+        chans = [c for c in chans if c.permissions_for(member).view_channel]
+    if not chans:
         return ""
+    if not force and not INFO_TOPIC.search(text or ""):
+        return ("Info channels (not loaded for this message; read one with `channel` if needed): "
+                + ", ".join(f"#{c.name}" for c in chans))
+    picked = _pick_channels(chans, text) if not force or len(chans) > 4 else chans
+    per = max(1500, min(8000, budget // len(picked)))
     out = []
-    for cid in ids:
-        ch = guild.get_channel_or_thread(cid)
-        if not ch or not hasattr(ch, "history"):
-            continue
-        if member is not None and hasattr(member, "roles") and not ch.permissions_for(member).view_channel:
-            continue
-        hit = _info_cache.get(cid)
-        if not hit or time.time() - hit[0] > INFO_TTL:
-            try:
-                hit = (time.time(), await channel_dump(ch, 50, 6000))
-            except discord.HTTPException:
-                hit = (time.time(), "")
-            _info_cache[cid] = hit
-        if hit[1]:
-            out.append(f"## #{ch.name}\n{hit[1]}")
-    text = "\n\n".join(out)
-    return text[:budget]
+    for ch in picked:
+        body = await _info_body(ch, per)
+        if body:
+            out.append(f"## #{ch.name}\n{body}")
+    rest = [c for c in chans if c not in picked]
+    if rest:
+        out.append("Other info channels (read with `channel` if the answer isn't above): "
+                   + ", ".join(f"#{c.name}" for c in rest))
+    return "\n\n".join(out)[:budget + 2000]
+
+MAX_INFO = 15
+SAVE_WORDS = re.compile(r"save|remember|memory|memorize|note|learn|store|mone rakh|mone rekh|rakh|rekhe dao|"
+                        r"info ?channel|মনে রাখ|সেভ", re.I)
+BARE_ID = re.compile(r"(?<![\d<#@&])(\d{17,20})(?!\d)")
+
+def referenced_channels(ctx, text):
+    """Channels named in the message: <#mentions> and bare channel IDs that belong to this server."""
+    out = []
+    for cid in list(CHAN_MENTION.findall(text or "")) + BARE_ID.findall(text or ""):
+        ch = ctx.guild.get_channel_or_thread(int(cid))
+        if ch is not None and hasattr(ch, "history") and ch not in out:
+            out.append(ch)
+    return out
+
+FAKE_ACTION = re.compile(
+    r"\b(i('| ha)ve (now )?(saved|noted|stored|updated|memori[sz]ed|processed|scanned|extracted|checked|read|"
+    r"accessed|parsed|reviewed|gone)|i (saved|noted|stored|updated|scanned|extracted|checked|read|parsed)\b|"
+    r"(saved|stored|added) (it |this |them |all )?(to|in) (my )?memory|updated my (memory|notes)|deep scan|"
+    r"i('m| am) (now )?(accessing|reading|scanning|parsing|reviewing|checking|moving|going|proceeding|processing|"
+    r"extracting|retrieving)|give me a (moment|minute|sec)|one moment|bear with me|please wait|"
+    r"i will (now )?(go|move|proceed|head) to)", re.I)
+FAKE_ACTION_NOTE = ("STOP. You just claimed to do something (save, read, scan, check, go somewhere, 'one moment') "
+                    "but you used NO tool, so nothing happened. You can only act with tools, and only inside this "
+                    "reply — there is no 'later'. Now either call the right tool (one line: `TOOL: <name> | <input>`, "
+                    "e.g. `TOOL: channel | <#id or name>`, `TOOL: learn_server | <fact>`, `TOOL: remember | <fact>`), "
+                    "or answer honestly using only data you actually have. Never invent prices or results.")
 
 def _server_admin(c):
     from core import is_admin
@@ -446,17 +512,42 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     names = {t.name for t in tools_now}
     user = ctx.user
     roles = [r.name for r in getattr(user, "roles", [])[1:]][::-1] if ctx.gid else []
+    pre_steps, pre_notes = [], []
+    refs = referenced_channels(ctx, text) if ctx.gid and ctx.guild else []
+    save_ask = bool(ctx.gid and ctx.guild and _server_admin(ctx) and SAVE_WORDS.search(text))
+    if save_ask and not refs:              # "save it" about channels given a few messages ago
+        for m in reversed(ai.history(key)):
+            if m["role"] == "user" and isinstance(m["content"], str):
+                refs = referenced_channels(ctx, m["content"])
+                if refs:
+                    break
+    if refs and save_ask:
+        g = store.guild(ctx.gid)
+        ids = g.setdefault("info_channels", [])
+        added = [c for c in refs if c.id not in ids and can_read(c, ctx.guild.me)][:MAX_INFO - len(ids)]
+        if added:
+            ids.extend(c.id for c in added)
+            store.save_guild(ctx.gid)
+            for c in added:
+                info_invalidate(c.id)
+            pre_steps.append(f"📌 saved {len(added)} info channel{'s' if len(added) > 1 else ''}")
+        pre_notes.append("These channels are now saved as info channels (the code did it, it's real): "
+                         + ", ".join(f"#{c.name}" for c in refs if c.id in ids)
+                         + ". Their content is in your info section. Confirm briefly, then answer from that data.")
     system = workspace.build_prompt(
         gid=ctx.gid, text=text, user_name=user.display_name, is_owner=is_owner(user), roles=roles,
         profile=store.profile(user.id), facts=[t for _, t in store.mem_list(user.id)],
         tool_lines=[f"`{t.usage}` — {t.desc}" for t in tools_now], place=_place(ctx), auto_channel=ctx.auto,
         ticket=ctx.ticket, mentionable=sorted({n for n in ctx.people if n != user.display_name.lower()})[:12],
-        info=await info_text(ctx.guild, user) if ctx.gid and ctx.guild else "")
+        info=await info_text(ctx.guild, user, text=text, force=ctx.ticket or bool(pre_notes))
+        if ctx.gid and ctx.guild else "")
     msgs = [_note(system), *ai.history(key)]
     if recent:
         msgs.append(_note("Recent messages in this channel before the user's message (context, oldest first):\n"
                           + "\n".join(recent)))
-    steps, urls = [], []
+    steps, urls = list(pre_steps), []
+    for n in pre_notes:
+        msgs.append(_note(n))
 
     async def show(t, arg):
         if ctx.progress:
@@ -475,17 +566,18 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     # channels mentioned in the message (#pricing) are read straight away
     if ctx.gid and ctx.guild and "channel" in names:
         info_ids = set(store.guild(ctx.gid).get("info_channels") or [])
-        done = 0
-        for cid in dict.fromkeys(CHAN_MENTION.findall(text)):
-            if done >= 2:
-                break
-            if int(cid) in info_ids or (ctx.channel and int(cid) == ctx.channel.id):
+        todo = [c for c in refs if c.id not in info_ids and not (ctx.channel and c.id == ctx.channel.id)][:15]
+        per = max(1500, 16000 // max(1, len(todo)))
+        for ch in todo:
+            if not can_read(ch, user):
                 continue
-            ch = ctx.guild.get_channel_or_thread(int(cid))
-            if ch and hasattr(ch, "history"):
-                await show(TOOLS["channel"], ch.name)
-                msgs.append(_note(f"Tool result (channel):\n{(await act('channel', cid)).text}"))
-                done += 1
+            await show(TOOLS["channel"], ch.name)
+            try:
+                body = await channel_dump(ch, 50, per)
+            except discord.HTTPException:
+                body = "(can't read: missing Read Message History)"
+            steps.append(f"📖 read #{ch.name}")
+            msgs.append(_note(f"Tool result (channel #{ch.name}, oldest first):\n{body or '(empty)'}"))
 
     # links in the message are opened straight away; explicit "search …" runs straight away
     links = [u.rstrip(").,!?>]'\"") for u in web.URL_RE.findall(text)]
@@ -526,15 +618,22 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
         models = smart_models()
     max_steps = 10 if heavy else 4
     reply = None
-    for step in range(max_steps + 1):
+    tools_used = len(steps)                 # channels read / saved by the code count as real actions
+    for step in range(max_steps + 2):
         reply, _ = await ai.ask(msgs, models=models)
         call = ai.parse_tool(reply)
         if not call:
+            if not tools_used and step <= max_steps and FAKE_ACTION.search(reply):
+                log.info("caught a claimed-but-not-done action, asking again")
+                msgs += [{"role": "assistant", "content": reply}, _note(FAKE_ACTION_NOTE)]
+                tools_used = -1                     # only once
+                continue
             break
         if step == max_steps:
             reply = None
             break
         name, arg = call
+        tools_used = max(tools_used, 0) + 1
         if name in names:
             await show(TOOLS[name], arg)
             res = await act(name, arg)
