@@ -1,11 +1,11 @@
 """Agent core: tool registry, skills, the think → act → observe loop, live progress, media and context."""
-import re, time, base64
+import re, time, base64, asyncio
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import discord
 
-import store, ai, web, workspace
+import store, ai, web, workspace, brain
 from store import cfg, log
 from core import client, feature, is_owner, chunks, EMOJI_RE
 
@@ -496,6 +496,11 @@ def sources_line(urls):
 def _note(text):
     return {"role": "system", "content": text}
 
+def _check(text):
+    """A correction after the model's own reply. Sent as a user turn: Gemma returns nothing after a trailing system
+    note, and it must not count as the real user talking."""
+    return {"role": "user", "content": "[Automatic check by the bot system — not from the user]\n" + text}
+
 def _place(ctx):
     if not ctx.gid:
         return "a DM"
@@ -627,6 +632,34 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
             steps.append(f"🔎 searched “{force_query[:40]}”"); urls.extend(res)
         msgs.append(_note(f"Tool result (search):\n{block or 'Search failed: ' + res}"))
 
+    # brain: tools the code can see are needed (maths, reminders, memory, fresh news), then a short tool plan
+    async def show_name(n, arg):
+        if n in TOOLS:
+            await show(TOOLS[n], arg)
+    done_names = set()
+    try:
+        auto = await brain.auto_tools(ctx, text, names, act, show_name,
+                                      info_loaded=bool(info and info.startswith("## ")) or force_query is not None)
+        for n, out in auto:
+            done_names.add(n)
+            if n == "calc":
+                steps.append("🧮 calculated")
+            msgs.append(_note(f"Tool result ({n}, run by the code for this message — real):\n{out}"))
+        already = bool(links or force_query or len(steps) > len(pre_steps) or auto
+                       or (info and info.startswith("## ")))
+        if brain.worth_planning(text, already):
+            hint = ("Info channels with this server's prices/plans are already loaded — don't read them again.\n"
+                    if info and info.startswith("## ") else "")
+            for n, arg in await brain.plan(ctx, text, names, hint):
+                if n in done_names and n != "channel":
+                    continue
+                done_names.add(n)
+                await show(TOOLS[n], arg)
+                res = await act(n, arg)
+                msgs.append(_note(f"Tool result ({n} | {arg[:80]}):\n{res.text}"))
+    except Exception as e:
+        log.warning("brain step failed: %s", e)
+
     # photos / voice
     user_line = f"{user.display_name}: {text}" if text else \
         f"{user.display_name}: (sent {', '.join(media[3]) if media else 'nothing'})"
@@ -651,15 +684,40 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     max_steps = 10 if heavy else 4
     reply = None
     tools_used = len(steps)                 # channels read / saved by the code count as real actions
-    for step in range(max_steps + 2):
-        reply, _ = await ai.ask(msgs, models=models)
+    grounding_left = 1
+    fallback_reply = None                   # a good-enough answer kept while a re-check runs
+    for step in range(max_steps + 3):
+        if fallback_reply is None:
+            reply, _ = await ai.ask(msgs, models=models)
+        else:
+            try:                            # a re-check may not cost more than ~25s or a model switch
+                reply, _ = await asyncio.wait_for(ai.ask(msgs, models=models), 25)
+            except Exception as e:
+                log.info("re-check failed (%s), keeping the first answer", str(e)[:80])
+                reply = fallback_reply
+                break
+            if not (reply or "").strip():
+                reply = fallback_reply
+                break
         call = ai.parse_tool(reply)
         if not call:
             if not tools_used and step <= max_steps and FAKE_ACTION.search(reply):
                 log.info("caught a claimed-but-not-done action, asking again")
-                msgs += [{"role": "assistant", "content": reply}, _note(FAKE_ACTION_NOTE)]
+                msgs += [{"role": "assistant", "content": reply}, _check(FAKE_ACTION_NOTE)]
                 tools_used = -1                     # only once
+                fallback_reply = fallback_reply or reply
                 continue
+            if grounding_left and step <= max_steps:
+                src = text + "\n" + "\n".join(m["content"] for m in msgs
+                                                if m["role"] == "system" and isinstance(m["content"], str))
+                bad = brain.unverified(reply, src)
+                if bad:
+                    grounding_left -= 1
+                    log.info("answer had unverified amounts %s, asking again", bad)
+                    msgs += [{"role": "assistant", "content": reply},
+                             _check(brain.GROUND_NOTE.format(bad=", ".join(bad)))]
+                    fallback_reply = fallback_reply or reply
+                    continue
             break
         if step == max_steps:
             reply = None

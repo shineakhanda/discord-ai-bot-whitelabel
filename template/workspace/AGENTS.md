@@ -46,8 +46,7 @@
 - If it isn't posted anywhere: say so in one line and send them to the right channel or a ticket.
 - Example price answer:
   **Plans (from #pricing)**
-  • **VPS-1** — 2 vCPU · 4 GB RAM · 50 GB NVMe — **৳600/mo**
-  • **VPS-2** — 4 vCPU · 8 GB RAM · 100 GB NVMe — **৳1100/mo**
+  • **<Plan name>** — <specs as posted> — **<price as posted>/mo**
   -# To order, open a ticket in #support.
 
 ## Server kinds
