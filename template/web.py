@@ -288,10 +288,63 @@ async def read_raw(url, limit=60000):
 # ---------- web search ----------
 def engine_ok(name):
     return {"google": bool(GOOGLE_KEY and GOOGLE_CX), "serper": bool(SERPER_KEY),
-            "tavily": bool(TAVILY_KEY), "ddg": DDGS is not None}.get(name, False)
+            "tavily": bool(TAVILY_KEY), "ddg": DDGS is not None, "html": True}.get(name, False)
 
 def active_engines():
-    return [e for e in cfg["engines"] if engine_ok(e)]
+    eng = [e for e in cfg["engines"] if engine_ok(e)]
+    return eng + ([] if "html" in eng else ["html"])          # free results-page fallback, always last
+
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/131.0 Safari/537.36")
+
+def _strip_tags(x):
+    import html as _h
+    return _h.unescape(re.sub(r"<[^>]+>", "", x or "")).strip()
+
+async def _html_search(q):
+    """No API key needed: read Bing's / DuckDuckGo's normal results page."""
+    from urllib.parse import quote_plus, unquote, parse_qs, urlparse as _up
+    import base64 as _b64
+    hdr = {"User-Agent": BROWSER_UA, "Accept-Language": "en-US,en;q=0.9"}
+    tries = [("bing", f"https://www.bing.com/search?q={quote_plus(q)}&setlang=en&cc=us"),
+             ("ddg", f"https://html.duckduckgo.com/html/?q={quote_plus(q)}")]
+    for name, url in tries:
+        try:
+            async with HTTP["s"].get(url, headers=hdr, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                if r.status != 200:
+                    continue
+                body = await r.text(errors="replace")
+        except Exception as e:
+            log.info("html search %s failed: %s", name, e)
+            continue
+        out = []
+        if name == "bing":
+            for blk in re.findall(r'<li class="b_algo".*?</li>', body, re.S)[:5]:
+                a = re.search(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', blk, re.S)
+                p = re.search(r'<p[^>]*>(.*?)</p>', blk, re.S) or re.search(r'class="b_caption"[^>]*>(.*?)</div>', blk, re.S)
+                if a:
+                    link = a.group(1)
+                    if "bing.com/ck/a" in link:            # Bing wraps links: u=a1<base64url>
+                        u = parse_qs(_up(link.replace("&amp;", "&")).query).get("u", [""])[0]
+                        if u.startswith("a1"):
+                            try:
+                                link = _b64.urlsafe_b64decode(u[2:] + "==").decode()
+                            except Exception:
+                                pass
+                    out.append((_strip_tags(a.group(2)), link, _strip_tags(p.group(1)) if p else ""))
+            # Bing's answer box (exchange rates, sums, weather …)
+            box = re.search(r'<div[^>]+class="[^"]*(?:b_focusTextLarge|b_focusTextMedium|b_ans)[^"]*"[^>]*>(.*?)</div>', body, re.S)
+            if box and _strip_tags(box.group(1)):
+                out.insert(0, ("Bing answer", url, _strip_tags(box.group(1))[:300]))
+        else:
+            for a, snip in re.findall(r'class="result__a"[^>]*href="([^"]+)"[^>]*>.*?class="result__snippet"[^>]*>(.*?)</a>',
+                                      body, re.S)[:5]:
+                link = unquote(parse_qs(_up(a.replace("&amp;", "&")).query).get("uddg", [a])[0])
+                out.append((link.split("/")[2] if "//" in link else link, link, _strip_tags(snip)))
+        out = [(t, u, b) for t, u, b in out if u.startswith("http")]
+        if out:
+            return out[:4]
+    return []
 
 def search_ready():
     return cfg["web"] != "off" and bool(active_engines())
@@ -381,6 +434,8 @@ async def web_search(q):
                 results = await _tavily(q)
             elif eng == "ddg":
                 results = await asyncio.wait_for(asyncio.to_thread(_ddg, q), 20)
+            elif eng == "html":
+                results = await _html_search(q)
         except Exception as e:
             log.warning("%s search failed: %s", eng, e)
             results = []

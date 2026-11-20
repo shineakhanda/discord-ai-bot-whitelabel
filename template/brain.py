@@ -75,11 +75,26 @@ async def auto_tools(ctx, text, names, act, show, info_loaded=False):
             res = await act("remember", f)
             done.append(("remember", res.text))
     if "search" in names and FRESH_RE.search(t) and len(t) > 8 and not (info_loaded and PRODUCT_RE.search(t)):
-        q = re.sub(r"^(hey|yo|bro|ok)\W+", "", t, flags=re.I)[:200]
+        q = await search_query(t)
         await show("search", q)
         res = await act("search", q)
         done.append(("search", res.text))
     return done
+
+
+async def search_query(text):
+    """Turn a chat message (often Banglish) into a short English web search query."""
+    plain = re.sub(r"^(hey|yo|bro|ok)\W+", "", text, flags=re.I)[:200]
+    try:
+        q, _ = await ai.ask([{"role": "system", "content":
+                              "Write ONE short English web search query (max 10 words) for what this Discord message "
+                              "wants to know. Ignore the bot's name. Add the place or 'today' if it matters. "
+                              "Reply with the query only."},
+                             {"role": "user", "content": plain}], max_tokens=30, temperature=0)
+        q = (q or "").strip().strip('"').splitlines()[0][:150] if q else ""
+        return q if len(q) > 3 else plain
+    except Exception:
+        return plain
 
 
 # ---------------------------------------------------------------- 2. tool plan

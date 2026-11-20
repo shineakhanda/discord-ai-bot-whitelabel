@@ -325,6 +325,32 @@ async def info_text(guild, member=None, budget=20000, text="", force=False):
     return "\n\n".join(out)[:budget + 2000]
 
 MAX_INFO = 15
+RULE_WORDS = re.compile(r"\b(rate|price|prices|charge|charges|fee|fees|discount|off|%|rule|policy|refund|payment|"
+                        r"bkash|nagad|always|never|from now|don'?t|do not|must|should|only|sell|buy|tax|vat|"
+                        r"stock|available|deadline|offer|bdt|usd|tk|taka|convert\w*|exchange|buying|selling|"
+                        r"month|months|plan|plans)\b|%|\$|৳", re.I)
+RULE_START = re.compile(r"^\W*(use|always|never|from now( on)?|don'?t|do not|set|apply|charge|add|tell (them|clients|"
+                        r"customers|everyone)|say|our|we (have|don'?t|do not|give|charge|sell|offer)|the (rate|price|"
+                        r"charge|fee|discount)|\d+\s*month|clients?|customers?)\b", re.I)
+
+def strip_trigger(text):
+    """Drop the bot's name / mention from the start of an instruction."""
+    from core import client
+    t = re.sub(r"^\s*<@!?\d+>\s*", "", text or "")
+    t = re.sub(r"^\s*\(replying to [^)]*\)\s*", "", t, flags=re.S)
+    me = (getattr(client.user, "name", "") or "").lower()
+    for n in sorted({me, me.replace(" ", "")} - {""}, key=len, reverse=True):
+        if t.lower().startswith(n):
+            t = t[len(n):]
+    return t.strip(" ,:-")
+
+def admin_rule(text):
+    """An admin telling the bot how to handle customers/prices (not a question)."""
+    t = re.sub(r"^\W*(so|ok(ay)?|and|also|note|btw|bro|listen|remember)\b[\s,:-]*", "", strip_trigger(text), flags=re.I)
+    if not (10 <= len(t) <= 400) or "?" in t or not RULE_WORDS.search(t):
+        return False
+    return bool(RULE_START.search(t)) or bool(re.search(r"\d", t) and re.search(
+        r"\b(is|are|=|will|gets?|has|have|costs?|per)\b|=", t, re.I))
 LOOKBACK_WORDS = re.compile(r"channel|them|those|these|ota|egula|oigula|sob", re.I)
 RULE_SAVE = re.compile(r"\b(?:save|remember|note|learn|memori[sz]e|mone rakh\w*|rekhe dao)\b[^:\n]{0,40}?"
                        r"(?:rules?|info|this|these|that|policy|policies|instructions?|facts?)?\s*:\s*(.{10,})",
@@ -546,10 +572,12 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
                              + ". Confirm in one short line. Answer any other question in the message from the data.")
         else:
             pre_notes.append("Those channels were already saved as info channels. Say so in one short line.")
-    elif save_ask and not refs:            # "save these rules: 1) … 2) …" -> server info, done by the code
+    elif ctx.gid and ctx.guild and _server_admin(ctx) and not refs and (save_ask or admin_rule(text)):
+        # "save these rules: 1) … 2) …" or an admin instruction ("use flat 125 sell and 118 buy") -> server info
         m = RULE_SAVE.search(text)
-        if m:
-            facts = [f.strip(" -•.;") for f in re.split(r"\n+|\s(?=\d[).]\s)|;\s*", m.group(1)) if len(f.strip()) > 8]
+        body = m.group(1) if m else (strip_trigger(text) if admin_rule(text) else "")
+        if body:
+            facts = [f.strip(" -•.;") for f in re.split(r"\n+|\s(?=\d[).]\s)|;\s*", body) if len(f.strip()) > 8]
             facts = [re.sub(r"^\d[).]\s*", "", f)[:300] for f in facts][:8]
             saved = []
             for f in facts:
@@ -756,6 +784,8 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     reply, ctx.mentioned = mentionize(reply, ctx.people) if ctx.people else (reply, set())
     note = f" [sent {', '.join(media[3])}]" if media and media[3] else ""
     ai.remember(key, user_line + note, reply)
+    if not steps and FAKE_ACTION.search(reply) and re.search(r"sav|updat|stor|note|memor|configur", reply, re.I):
+        steps.append("⚠️ nothing was saved — say “save this rule: …” or use /setup knowledge")
     footer = ("\n-# " + " · ".join(dict.fromkeys(steps))) if steps else ""
     return reply + footer + sources_line(list(dict.fromkeys(urls)))
 
