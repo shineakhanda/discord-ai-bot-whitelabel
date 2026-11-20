@@ -1,0 +1,6 @@
+discord.py>=2.3
+aiohttp>=3.9
+cryptography>=42
+ddgs
+tzdata
+asyncssh>=2.14
