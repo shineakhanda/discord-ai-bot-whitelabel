@@ -22,6 +22,10 @@ FRESH_RE = re.compile(
     r"usd to bdt|gold price|sonar dam|bitcoin|btc|eth\b|crypto price|stock price|share price|release date|"
     r"released|launch(ed)? date|new version|update ki|trending|viral|election|breaking)\b", re.I)
 
+LEARN_RE = re.compile(r"\b(scan|crawl|learn|study|index|save|remember|mone rakh\w*|rekhe dao|shikh\w*|porho|pore nao)\b"
+                      r".{0,60}\b(site|website|store|shop|page|pages|link|domain|data)\b|"
+                      r"\b(site|website|store|shop)\b.{0,60}\b(scan|crawl|learn|save|remember|mone rakh\w*)\b|"
+                      r"\b(scan|crawl|learn|index)\s+(https?://|[\w-]+\.[a-z]{2,})", re.I | re.S)
 PRODUCT_RE = re.compile(r"\b(vps|rdp|vds|dedicated|bare ?metal|hosting|domain|minecraft|mc|plan|package|xeon|epyc|"
                         r"ryzen|intel|amd|reseller|wordpress|server|order|ticket)\b", re.I)
 BN_DIGITS = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
@@ -74,6 +78,12 @@ async def auto_tools(ctx, text, names, act, show, info_loaded=False):
         for f in facts:
             res = await act("remember", f)
             done.append(("remember", res.text))
+    if "learn_site" in names and LEARN_RE.search(t):
+        m = re.search(r"https?://\S+|\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|xyz|io|dev|bd|shop|store|app|co|me|gg|in)\b\S*", t)
+        if m:
+            res = await act("learn_site", m.group().rstrip(").,!?>"))
+            done.append(("learn_site", res.text))
+            return done
     if "search" in names and FRESH_RE.search(t) and len(t) > 8 and not (info_loaded and PRODUCT_RE.search(t)):
         q = await search_query(t)
         await show("search", q)

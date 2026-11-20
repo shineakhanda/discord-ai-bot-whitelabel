@@ -1,5 +1,5 @@
 """Agent core: tool registry, skills, the think → act → observe loop, live progress, media and context."""
-import re, time, base64, asyncio
+import re, sys, time, base64, asyncio
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -31,6 +31,7 @@ class Ctx:
     people: dict = field(default_factory=dict)       # display name (lower) -> user id, people __BOT_NAME__ may @mention
     mentioned: set = field(default_factory=set)      # ids actually mentioned in the final reply
     after_send: list = field(default_factory=list)   # (content, view) messages to send after the answer
+    query: str = ""                                  # the user's message (pages are trimmed to what it asks)
 
 @dataclass
 class Result:
@@ -124,11 +125,12 @@ async def t_read(ctx, a):
     if not store.quota(ctx.gid, ctx.user.id, "browse"):
         return Result("Today's page-reading limit for this server is used up.")
     try:
-        title, page = await web.read_page(url)
+        title, page = await web.read_page(url, getattr(ctx, "query", ""))
     except web.BlockedURL as e:
         return Result(f"Can't open that link: {e}")
     host = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
-    return Result(f"Page {url} (title: {title or 'n/a'}):\n{page}", f"📖 read {host}", [url])
+    return Result(f"Page {url} (title: {title or 'n/a'}) — real content, JavaScript already run by the bot's browser "
+                  f"(the parts relevant to the question):\n{page}", f"📖 read {host}", [url])
 
 @tool("history", "history | <number 5-50>", "read earlier messages in this channel",
       when=lambda c: c.channel is not None and c.gid is not None, progress="💬 Reading earlier messages…")
@@ -325,6 +327,8 @@ async def info_text(guild, member=None, budget=20000, text="", force=False):
     return "\n\n".join(out)[:budget + 2000]
 
 MAX_INFO = 15
+SITE_Q = re.compile(r"\b(website|site|store|shop|product|products|item|items|cape|account|nitro|sell|selling|available|"
+                    r"stock|order|buy|kinbo|ache|kinte)\b", re.I)
 RULE_WORDS = re.compile(r"\b(rate|price|prices|charge|charges|fee|fees|discount|off|%|rule|policy|refund|payment|"
                         r"bkash|nagad|always|never|from now|don'?t|do not|must|should|only|sell|buy|tax|vat|"
                         r"stock|available|deadline|offer|bdt|usd|tk|taka|convert\w*|exchange|buying|selling|"
@@ -375,6 +379,12 @@ FAKE_ACTION = re.compile(
     r"i('m| am) (now )?(accessing|reading|scanning|parsing|reviewing|checking|moving|going|proceeding|processing|"
     r"extracting|retrieving)|give me a (moment|minute|sec)|one moment|bear with me|please wait|"
     r"i will (now )?(go|move|proceed|head) to)", re.I)
+CANT_RE = re.compile(r"(can'?t|cannot|unable to|not able to|don'?t have (the )?(ability|access)|no (direct )?access|"
+                     r"parchi na|parini|pari na|ক্ষমতা নেই|পারছি না|পারি না|সম্ভব না).{0,60}"
+                     r"(brows|access|read|open|scrap|scan|see|load|ব্রাউজ|সাইট|ওয়েব|website|site|page|link)", re.I | re.S)
+CANT_NOTE = ("You DID open the page with your browser in this reply — its real content is in the Tool result above. "
+             "Never say you can't browse. Answer from that content: list what's there (products, prices, info). If the "
+             "specific thing isn't in it, say it isn't on that page and suggest the exact page/section to check.")
 ROLE_SLIP = re.compile(r"you can (respond|reply|say|answer)|here are (some|a few|\d) (options|ways|replies|responses)|"
                        r"\boption [1-3]\b|which one fits|depending on how you want|you could (reply|respond|say)|"
                        r"it looks like you are continuing|if you (want|wish) to (reply|respond)|suggested repl", re.I)
@@ -550,6 +560,7 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     """Think → act → observe until done. Returns the reply text (with footer)."""
     tools_now = available(ctx)
     names = {t.name for t in tools_now}
+    ctx.query = text or ""
     user = ctx.user
     roles = [r.name for r in getattr(user, "roles", [])[1:]][::-1] if ctx.gid else []
     pre_steps, pre_notes = [], []
@@ -608,6 +619,18 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     if recent:
         msgs.append(_note("Recent messages in this channel before the user's message (context, oldest first):\n"
                           + "\n".join(recent)))
+    sb = sys.modules.get("features.sitebrain")
+    if sb and ctx.gid and (INFO_TOPIC.search(text or "") or SITE_Q.search(text or "")) and not web.URL_RE.search(text or ""):
+        try:
+            site = sb.site_context(ctx.gid, text)
+        except Exception as e:
+            site = ""
+            log.warning("site context failed: %s", e)
+        if site:
+            msgs.append(_note("WEBSITE DATA — pages of this server's website, read by the bot's browser and saved "
+                              "(real data). Use it for products, prices and info; quote exactly; link the page.\n\n"
+                              + site))
+            steps.append("🌐 used saved website")
     if info:
         loaded = info.startswith("## ")
         msgs.append(_note(
@@ -724,6 +747,7 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     tools_used = len(steps)                 # channels read / saved by the code count as real actions
     grounding_left = 1
     role_fixed = False
+    cant_fixed = False
     fallback_reply = None                   # a good-enough answer kept while a re-check runs
     for step in range(max_steps + 3):
         if fallback_reply is None:
@@ -744,6 +768,13 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
                 log.info("caught a claimed-but-not-done action, asking again")
                 msgs += [{"role": "assistant", "content": reply}, _check(FAKE_ACTION_NOTE)]
                 tools_used = -1                     # only once
+                fallback_reply = fallback_reply or reply
+                continue
+            if not cant_fixed and step <= max_steps and any(x.startswith(("📖", "🔎", "📸")) for x in steps) \
+                    and CANT_RE.search(reply):
+                cant_fixed = True
+                log.info("reply said it can't browse after a successful read, asking again")
+                msgs += [{"role": "assistant", "content": reply}, _check(CANT_NOTE)]
                 fallback_reply = fallback_reply or reply
                 continue
             if not role_fixed and step <= max_steps and ROLE_SLIP.search(reply):

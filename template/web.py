@@ -278,11 +278,38 @@ def browser_name():
 
 _page_cache = {}
 
-async def read_page(url):
-    """Returns (title, text) of a public web page, trimmed for the AI.
+async def read_page(url, query=""):
+    """Returns (title, text) of a public web page, trimmed for the AI to the parts that matter for `query`.
     Lightpanda (runs JavaScript, waits for data) -> real Chrome reader -> data hidden in the HTML -> plain HTTP."""
     title, text = await _read_any(url)
-    return title, text[:PAGE_CHARS]
+    return title, focus_text(text, query, PAGE_CHARS)
+
+PRICE_HINT = re.compile(r"[৳$€£₹]|\b(tk|bdt|usd|price|taka|/mo|per month|buy|add to cart|sold|stock|plan)\b|\d[\d,.]*\s*%", re.I)
+
+def focus_text(text, query="", budget=PAGE_CHARS):
+    """Long page -> the start of the page plus the blocks that match the question or look like prices/products."""
+    if len(text) <= budget:
+        return text
+    blocks = [b for b in re.split(r"\n(?=#)|\n{2,}|\n(?=[-*•|] )", text) if b.strip()]
+    if len(blocks) < 4:
+        blocks = [text[i:i + 600] for i in range(0, len(text), 600)]
+    words = {w for w in re.findall(r"[a-z0-9\u0980-\u09ff]{3,}", (query or "").lower())} - {
+        "the", "and", "what", "koto", "ache", "ase", "kono", "this", "that", "with", "from", "dam", "check", "site", "website",
+        "https", "http", "www", "com", "xyz", "page", "read", "bolo", "tell", "about", "products", "product"}
+    head = text[:min(1200, budget // 5)]
+    scored = []
+    for i, b in enumerate(blocks):
+        bl = b.lower()
+        sc = sum(3 for w in words if w in bl) + (2 if PRICE_HINT.search(b) else 0) + min(len(re.findall(r"\d", b)), 6) * .2
+        scored.append((sc, i, b))
+    keep, used = set(), len(head)
+    for sc, i, b in sorted(scored, key=lambda x: (-x[0], x[1])):
+        if sc <= 0 or used + len(b) > budget:
+            continue
+        keep.add(i)
+        used += len(b)
+    body = "\n".join(blocks[i].strip() for i in sorted(keep))
+    return (head + "\n…\n" + body)[:budget] if body else text[:budget]
 
 async def _read_any(url, limit=60000):
     url = url.rstrip(").,!?>")

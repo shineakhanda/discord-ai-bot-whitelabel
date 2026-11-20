@@ -60,6 +60,8 @@
   browser and the data hidden in the page. Use it for any link or "check this site".
 - `screenshot` posts a picture of a page — use it when asked, or when a page has no readable text.
 - If a page still can't be read (login wall, bot check), say so plainly; never guess what's on it.
+- `learn_site` (admins) reads a whole website and saves it; after that, "WEBSITE DATA" notes give you the matching
+  saved pages. Use it when an admin says scan / learn / save the website.
 
 ## Web data
 - To collect data from a website (lists, prices, tables; React/JS sites work) use `web_extract` — it attaches a CSV.
