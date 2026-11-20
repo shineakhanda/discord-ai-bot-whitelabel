@@ -773,7 +773,7 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
                 tools_used = -1                     # only once
                 fallback_reply = fallback_reply or reply
                 continue
-            if not cant_fixed and step <= max_steps and any(x.startswith(("📖", "🔎", "📸")) for x in steps) \
+            if not cant_fixed and step <= max_steps and any(x.startswith(("📖", "🔎", "📸", "🌐")) for x in steps) \
                     and CANT_RE.search(reply):
                 cant_fixed = True
                 log.info("reply said it can't browse after a successful read, asking again")

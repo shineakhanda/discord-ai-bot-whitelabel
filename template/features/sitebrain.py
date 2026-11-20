@@ -17,6 +17,8 @@ db.executescript("""
 CREATE TABLE IF NOT EXISTS site_pages (guild_id INTEGER, url TEXT, host TEXT, title TEXT, text TEXT, ts REAL,
                                        PRIMARY KEY (guild_id, url));
 CREATE INDEX IF NOT EXISTS site_pages_g ON site_pages (guild_id, host);
+CREATE TABLE IF NOT EXISTS site_items (guild_id INTEGER, host TEXT, name TEXT, price TEXT, url TEXT, extra TEXT,
+                                       PRIMARY KEY (guild_id, host, name, price));
 """)
 db.commit()
 
@@ -28,6 +30,37 @@ GOOD = re.compile(r"/(product|products|shop|store|item|items|p|category|categori
 MAX_PAGES = 40
 _running = set()
 
+
+PRICE_RE = re.compile(r"(?:[$৳€£₹]\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*(?:\.\d+)?\s?(?:tk|bdt|usd|taka|৳|\$)(?![a-z]))", re.I)
+NOT_NAME = re.compile(r"^(total|subtotal|price|sale|from|only|save|discount|was|now|regular|starting|per|each|add to cart|"
+                      r"buy now|in stock|out of stock|sold out|qty|quantity|home|cart|\W*)$", re.I)
+
+def _clean(line):
+    line = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", line)
+    line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
+    return re.sub(r"[#*_>`|•\-–—]+", " ", line).strip()
+
+def extract_items(text, url):
+    """(name, price, extra) pairs from a page: 'COPPER CAPE' + '$0.04', 'INTEL-48 … ৳3,826/mo', table rows."""
+    lines = [_clean(l) for l in (text or "").splitlines()]
+    lines = [l for l in lines if l]
+    out = []
+    for i, l in enumerate(lines):
+        for m in PRICE_RE.finditer(l):
+            name = _clean(l[:m.start()]).strip(" :=")
+            if len(re.findall(r"[A-Za-z\u0980-\u09ff]", name)) < 3 or NOT_NAME.match(name):
+                j = i - 1
+                while j >= 0 and (PRICE_RE.search(lines[j]) is None) and len(lines[j]) < 3:
+                    j -= 1
+                name = lines[j] if j >= 0 and not PRICE_RE.search(lines[j]) else ""
+            name = re.sub(r"\s+", " ", name)[:90]
+            if 3 <= len(name) <= 90 and not NOT_NAME.match(name):
+                nxt = lines[i + 1] if i + 1 < len(lines) else ""
+                extra = nxt[:80] if re.search(r"stock|deliver|month|/mo|day|gb|core|ram|ssd|nvme|warranty", nxt, re.I) \
+                    and not PRICE_RE.search(nxt) else ""
+                out.append((name, m.group().strip(), extra))
+            break
+    return out[:200]
 
 def _same_site(u, host):
     h = urlparse(u).netloc.lower().removeprefix("www.")
@@ -102,6 +135,12 @@ async def crawl(gid, start, limit=MAX_PAGES, progress=None):
                 if len(text) > 80:
                     db.execute("INSERT OR REPLACE INTO site_pages VALUES (?, ?, ?, ?, ?, ?)",
                                (gid, u, host, title[:200], text[:15000], time.time()))
+                    items = extract_items(md or text, u)
+                    if len(items) == 1 and title:          # a product page: its own title is the product name
+                        items = [(title.split("|")[0].strip()[:90], items[0][1], items[0][2])]
+                    for name, price, extra in items:
+                        db.execute("INSERT OR REPLACE INTO site_items VALUES (?, ?, ?, ?, ?, ?)",
+                                   (gid, host, name, price, u, extra))
                     db.commit()
                     saved += 1
             except web.BlockedURL:
@@ -134,8 +173,39 @@ def sites(gid):
                       (gid,)).fetchall()
 
 
+def item_matches(gid, query, limit=8):
+    """Products whose name matches the question, with their exact price and page."""
+    words = [w for w in re.findall(r"[a-z0-9\u0980-\u09ff]{2,}", (query or "").lower())
+             if w not in {"the", "er", "ki", "koto", "dam", "price", "of", "what", "is", "ache", "kono", "bolo", "tell",
+                          "me", "support", "and", "ar", "how", "much", "taka"}]
+    if not words:
+        return []
+    rows = db.execute("SELECT name, price, url, extra FROM site_items WHERE guild_id=?", (gid,)).fetchall()
+    scored = []
+    for name, price, url, extra in rows:
+        nl = name.lower()
+        hits = sum(1 for w in words if w in nl)
+        if hits:
+            scored.append((hits / max(1, len(nl.split())) + hits, name, price, url, extra))
+    scored.sort(key=lambda x: -x[0])
+    best = scored[0][0] if scored else 0
+    seen, out = set(), []
+    for sc, name, price, url, extra in scored:
+        key = (name.lower(), price)
+        if sc >= best * 0.6 and key not in seen:
+            seen.add(key)
+            out.append((name, price, url, extra))
+        if len(out) >= limit:
+            break
+    return out
+
 def site_context(gid, query, budget=7000):
-    """The saved pages that best match the question, trimmed to the matching parts."""
+    """Exact product matches first, then the saved pages that best match the question."""
+    items = item_matches(gid, query)
+    head = ""
+    if items:
+        head = ("PRODUCT MATCHES — exact name and price as shown on the website (use THESE prices):\n"
+                + "\n".join(f"- {n} — {p}" + (f" ({e})" if e else "") + f" — {u}" for n, p, u, e in items) + "\n\n")
     rows = db.execute("SELECT url, title, text FROM site_pages WHERE guild_id=?", (gid,)).fetchall()
     if not rows:
         return ""
@@ -151,7 +221,7 @@ def site_context(gid, query, budget=7000):
     top = [s for s in scored if s[0] > 0][:4] or scored[:2]
     per = max(1200, budget // max(1, len(top)))
     out = [f"## {title or url}\n{url}\n{web.focus_text(text, query, per)}" for _, url, title, text in top]
-    return "\n\n".join(out)[:budget + 500]
+    return (head + "\n\n".join(out))[:budget + 1500]
 
 
 def _admin(c):
