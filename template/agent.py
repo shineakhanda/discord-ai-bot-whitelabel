@@ -633,7 +633,7 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
             msgs.append(_note("WEBSITE DATA — pages of this server's website, read by the bot's browser and saved "
                               "(real data). Use it for products, prices and info; quote exactly; link the page.\n\n"
                               + site))
-            steps.append("🌐 used saved website")
+            pre_steps.append("🌐 used saved website")
     if info:
         loaded = info.startswith("## ")
         msgs.append(_note(
