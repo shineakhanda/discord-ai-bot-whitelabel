@@ -62,11 +62,54 @@ def history(key):
     cutoff = time.time() - CTX_TTL
     while q and q[0][0] < cutoff:
         q.popleft()
-    return [{"role": r, "content": c} for _, r, c in q]
+    out = [{"role": r, "content": c} for _, r, c in q]
+    try:
+        import store
+        summ = store.summary_get(key)
+    except Exception:
+        summ = ""
+    if summ:
+        out.insert(0, {"role": "system", "content": "Earlier in this conversation (summary of older messages):\n"
+                                                   + summ})
+    return out
+
+# ---------- compaction + memory flush (OpenClaw-style): old turns are summarized, not lost ----------
+_overflow = defaultdict(list)
+_compacting = set()
+
+async def _compact(key):
+    import store
+    if key in _compacting:
+        return
+    _compacting.add(key)
+    try:
+        lines, _overflow[key] = _overflow[key], []
+        old = store.summary_get(key)
+        prompt = ("Update the running summary of a Discord conversation. Keep: who is who, what they want, decisions, "
+                  "numbers/prices/plans mentioned, open questions, promises made. Drop chit-chat. Max 12 short bullet "
+                  "lines, same language mix as the chat. Reply with the bullets only.")
+        body = (f"Current summary:\n{old or '(none)'}\n\nOlder messages to fold in:\n" + "\n".join(lines))[:9000]
+        text, _ = await ask([{"role": "system", "content": prompt}, {"role": "user", "content": body}],
+                            max_tokens=400, temperature=0.2)
+        if text and len(text) > 20:
+            store.summary_set(key, text.strip())
+            log.info("compacted chat %s into summary (%d chars)", key, len(text))
+    except Exception as e:
+        log.info("compaction skipped: %s", str(e)[:120])
+    finally:
+        _compacting.discard(key)
 
 def remember(key, user_line, reply):
     import store
     q, now = _q(key), time.time()
+    if q.maxlen and len(q) >= q.maxlen - 1:          # the oldest turns are about to fall off: fold them into the summary
+        for _, r, c in list(q)[:2]:
+            _overflow[key].append(f"{'bot' if r == 'assistant' else 'user'}: {str(c)[:600]}")
+        if len(_overflow[key]) >= 6:
+            try:
+                asyncio.get_running_loop().create_task(_compact(key))
+            except RuntimeError:
+                pass
     for role, text in (("user", user_line), ("assistant", reply)):
         q.append((now, role, text))
         try:
@@ -78,6 +121,8 @@ def forget(key):
     import store
     ctx.pop(key, None)
     store.ctx_clear(key)
+    _overflow.pop(key, None)
+    store.summary_set(key, "")
 
 def resize_ctx():
     n = cfg["max_turns"] * 2
@@ -429,3 +474,112 @@ def leaks_identity(text, source=""):
     """True if the reply claims another creator/model (and the user didn't bring it up)."""
     m = IDENTITY_LEAK.search(text or "")
     return bool(m) and not IDENTITY_LEAK.search(source or "")
+
+
+# =====================================================================
+# native tool calling (OpenClaw-style agent loop): the model calls typed tools, several at once
+# =====================================================================
+GEMINI_PREF = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite",
+               "gemini-3.1-flash-lite", "gemini-3-flash", "gemini-2.5-flash"]
+BRAIN = {"models": [], "checked": 0.0}       # native-tool models found for this key, best first
+_no_tools = set()                            # models that rejected the tools field
+
+
+async def detect_brain_models():
+    """Ask Google which Gemini models this key can use; keep the best Flash models for agent work."""
+    forced = [m.strip() for m in env("BRAIN_MODELS").split(",") if m.strip()]
+    if forced:
+        BRAIN["models"] = forced
+        return forced
+    if not GOOGLE_AI_KEY:
+        return []
+    try:
+        async with HTTP["s"].get(f"{GOOGLE_BASE}/models", headers={"Authorization": f"Bearer {GOOGLE_AI_KEY}"},
+                                 timeout=aiohttp.ClientTimeout(total=20)) as r:
+            data = await r.json(content_type=None)
+        ids = {str(m.get("id", "")).removeprefix("models/") for m in (data.get("data") or [])}
+    except Exception as e:
+        log.warning("couldn't list Google models: %s", e)
+        ids = set()
+    found = [m for m in GEMINI_PREF if m in ids]
+    if not found:                            # unknown newer names: take any flash model, newest-looking first
+        found = sorted((i for i in ids if i.startswith("gemini") and "flash" in i and "image" not in i
+                        and "tts" not in i and "live" not in i and "exp" not in i), reverse=True)[:3]
+    BRAIN["models"] = ["g:" + m for m in found[:3]]
+    BRAIN["checked"] = time.time()
+    log.info("brain models (native tools): %s", ", ".join(BRAIN["models"]) or "none — using text tools")
+    return BRAIN["models"]
+
+
+async def _call_tools(model, messages, tools, max_tokens, temperature):
+    base, key, mid, is_or = provider(model)
+    if not key:
+        raise APIError(401, "no API key")
+    payload = {"model": mid, "messages": messages, "max_tokens": max_tokens, "tools": tools,
+               "tool_choice": "auto", "temperature": 0.4 if temperature is None else temperature}
+    if "googleapis.com" in base:
+        payload["reasoning_effort"] = "low"          # Gemini: a little thinking helps tool choice, stays fast
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    async with HTTP["s"].post(f"{base}/chat/completions", json=payload, headers=headers,
+                              timeout=aiohttp.ClientTimeout(total=float(env("BRAIN_TIMEOUT", "60") or 60))) as r:
+        try:
+            data = await r.json(content_type=None)
+        except Exception:
+            data = {"error": {"message": (await r.text())[:200]}}
+        if isinstance(data, list):
+            data = data[0] if data and isinstance(data[0], dict) else {"error": {"message": str(data)[:300]}}
+        if r.status == 400 and "reasoning" in str(data).lower() and "reasoning_effort" in payload:
+            payload.pop("reasoning_effort")
+            async with HTTP["s"].post(f"{base}/chat/completions", json=payload, headers=headers,
+                                      timeout=aiohttp.ClientTimeout(total=60)) as r2:
+                data = await r2.json(content_type=None)
+                if isinstance(data, list):
+                    data = data[0] if data else {}
+                status = r2.status
+        else:
+            status = r.status
+        if status != 200 or not isinstance(data, dict) or not data.get("choices"):
+            err = (data.get("error") or {}).get("message", str(data))[:300] if isinstance(data, dict) else str(data)
+            raise APIError(status, err)
+    msg = data["choices"][0].get("message") or {}
+    calls = []
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except Exception:
+            args = {"input": fn.get("arguments") or ""}
+        calls.append({"id": tc.get("id") or f"call_{len(calls)}", "name": fn.get("name", ""),
+                      "args": args if isinstance(args, dict) else {"input": str(args)}})
+    text = clean(msg.get("content") or "")
+    assistant = {"role": "assistant", "content": msg.get("content") or None}
+    if msg.get("tool_calls"):
+        assistant["tool_calls"] = msg["tool_calls"]
+    return text, calls, assistant
+
+
+async def ask_tools(messages, tools, models=None, max_tokens=None, temperature=None):
+    """One agent step with native tool calls. Returns (text, calls, assistant_message, model).
+    Tries the brain models in order; raises if none can do it (caller falls back to text tools)."""
+    order = [m for m in (models or BRAIN["models"]) if m not in _no_tools]
+    mods = [m for m in order if not _skip(m)] or order[:1]
+    errors = []
+    for m in mods:
+        t0 = time.monotonic()
+        try:
+            text, calls, amsg = await _call_tools(m, messages, tools, max_tokens or cfg["max_tokens"], temperature)
+            log.info("brain step from %s in %.1fs (%d tool call%s)", m, time.monotonic() - t0, len(calls),
+                     "" if len(calls) == 1 else "s")
+            return fix_script(text), calls, amsg, m
+        except APIError as e:
+            if e.status == 400 and re.search(r"tool|function", str(e), re.I):
+                _no_tools.add(m)
+            daily = e.status == 429 and re.search(r"per.?day|daily|RPD|quota", str(e), re.I)
+            _mark(m, "gone" if daily or e.status == 404 else "busy" if e.status in (429, 503, 529) else "error")
+            log.warning("brain %s failed: %s", m, str(e)[:200])
+            errors.append(f"{m}: {str(e)[:120]}")
+        except Exception as e:
+            _mark(m, "error")
+            log.warning("brain %s failed: %s: %s", m, type(e).__name__, str(e)[:200])
+            errors.append(f"{m}: {type(e).__name__}")
+    raise RuntimeError("; ".join(errors) or "no brain model")

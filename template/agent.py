@@ -77,6 +77,44 @@ def split_args(arg, n=None):
         parts = parts[:n - 1] + [" | ".join(parts[n - 1:])]
     return parts
 
+_SCHEMAS = {}
+
+def tool_schema(t):
+    """OpenAI/Gemini function schema from a tool's usage line, e.g. 'channel | <#channel or name> | <messages, optional>'."""
+    if t.name in _SCHEMAS:
+        return _SCHEMAS[t.name]
+    parts = [p.strip() for p in t.usage.split("|")[1:] if p.strip()]
+    props, req, keys = {}, [], []
+    for i, p in enumerate(parts):
+        label = re.sub(r"[<>`]", "", p).strip()
+        key = re.sub(r"[^a-z0-9]+", "_", re.split(r",| or |=|\(", label.lower())[0]).strip("_")[:28] or f"arg{i + 1}"
+        if key in props or key[0].isdigit():
+            key = f"arg{i + 1}_{key}"[:30]
+        props[key] = {"type": "string", "description": label[:240]}
+        keys.append(key)
+        if "optional" not in label.lower():
+            req.append(key)
+    params = {"type": "object", "properties": props}
+    if req:
+        params["required"] = req
+    spec = {"type": "function", "function": {"name": t.name, "description": t.desc[:600], "parameters": params}}
+    _SCHEMAS[t.name] = (spec, keys)
+    return _SCHEMAS[t.name]
+
+def args_to_input(name, args):
+    """Native tool-call arguments -> the tool's ' | ' input string."""
+    if name not in TOOLS:
+        return ""
+    _, keys = tool_schema(TOOLS[name])
+    if not keys:
+        return ""
+    if set(args) - set(keys) and "input" in args:
+        return str(args["input"])
+    vals = [str(args.get(k, "") if args.get(k) is not None else "").strip() for k in keys]
+    while vals and not vals[-1]:
+        vals.pop()
+    return " | ".join(vals)
+
 async def run_tool(ctx, name, arg):
     t = TOOLS[name]
     try:
@@ -754,7 +792,18 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
     role_fixed = False
     cant_fixed = False
     fallback_reply = None                   # a good-enough answer kept while a re-check runs
-    for step in range(max_steps + 3):
+
+    # ---- OpenClaw-style loop: native, typed tool calls (several at once) on the brain model ----
+    native_done = False
+    if ai.BRAIN["models"] and cfg.get("brain", True) and text and not brain.CHAT_RE.match(text) \
+            and len(text.strip()) >= 4:
+        try:
+            reply = await native_loop(ctx, msgs, tools_now, names, act, show, steps, text, max_steps)
+            native_done = reply is not None
+        except Exception as e:
+            log.warning("native tool loop failed, using text tools: %s", str(e)[:200])
+            reply = None
+    for step in range(0 if native_done else max_steps + 3):
         if fallback_reply is None:
             reply, _ = await ai.ask(msgs, models=models)
         else:
@@ -841,6 +890,58 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
         steps.append("⚠️ nothing was saved — say “save this rule: …” or use /setup knowledge")
     footer = ("\n-# " + " · ".join(dict.fromkeys(steps))) if steps else ""
     return reply + footer + sources_line(list(dict.fromkeys(urls)))
+
+async def native_loop(ctx, msgs, tools_now, names, act, show, steps, text, max_steps):
+    """Think -> call tools (in parallel) -> observe, with real function calling. Returns the reply or None."""
+    specs = [tool_schema(t)[0] for t in tools_now]
+    # one system message (prompt + every note), then the conversation, then the user's message
+    system = "\n\n".join(m["content"] for m in msgs if m["role"] == "system" and isinstance(m["content"], str))
+    convo = [m for m in msgs if m["role"] in ("user", "assistant")]
+    nmsgs = [{"role": "system", "content": system + "\n\n# Tools\nCall tools with the function-calling API "
+              "(you may call several at once). Never write tool calls as text. After tool results, answer the user."},
+             *convo]
+    flags = {"fake": False, "cant": False, "role": False, "ground": False}
+    used = len(steps)
+    reply = None
+    for step in range(max_steps + 4):
+        reply, calls, amsg, model = await ai.ask_tools(nmsgs, specs)
+        if calls and step < max_steps + 2:
+            nmsgs.append(amsg)
+
+            async def run1(c):
+                n = c["name"]
+                arg = args_to_input(n, c["args"])
+                if n not in names:
+                    return c, Result(f"Tool '{n}' is not available to this user here. Answer without it.")
+                await show(TOOLS[n], arg)
+                return c, await act(n, arg)
+            results = await asyncio.gather(*(run1(c) for c in calls[:6]))
+            for c, res in results:
+                nmsgs.append({"role": "tool", "tool_call_id": c["id"], "name": c["name"], "content": res.text[:9000]})
+            used += len(results)
+            continue
+        if not (reply or "").strip():
+            return None
+        note = None
+        if not used and not flags["fake"] and FAKE_ACTION.search(reply):
+            flags["fake"], note = True, FAKE_ACTION_NOTE
+        elif not flags["cant"] and (used or any(x.startswith(("📖", "🔎", "📸", "🌐")) for x in steps)) \
+                and CANT_RE.search(reply):
+            flags["cant"], note = True, CANT_NOTE
+        elif not flags["role"] and ROLE_SLIP.search(reply):
+            flags["role"], note = True, ROLE_NOTE
+        elif not flags["ground"]:
+            src = text + "\n" + system + "\n" + "\n".join(m["content"] for m in nmsgs
+                                                          if m["role"] == "tool" and isinstance(m["content"], str))
+            bad = brain.unverified(reply, src)
+            if bad:
+                flags["ground"], note = True, brain.GROUND_NOTE.format(bad=", ".join(bad))
+        if note and step < max_steps + 3:
+            log.info("brain reply re-checked: %s", note[:60])
+            nmsgs += [{"role": "assistant", "content": reply}, _check(note)]
+            continue
+        return reply
+    return reply
 
 IDENTITY_NOTE = ("You are __BOT_NAME__, an AI made and owned by __OWNER__. Never say you were made, trained or "
                  "researched by NVIDIA, OpenAI, Google, Meta, DeepSeek or anyone else. Never call yourself a language model.")

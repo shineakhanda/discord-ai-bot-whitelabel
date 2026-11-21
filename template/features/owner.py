@@ -27,7 +27,7 @@ OWNER_HELP = (
     f"`{PREFIX}premium <guild_id> on|off` · `{PREFIX}block|unblock <user>` · `{PREFIX}blockguild|unblockguild <id>`\n"
     f"`{PREFIX}memory [add <rule>|del <n>|clear]` standing instructions (workspace/MEMORY.md)\n"
     f"`{PREFIX}soul` · `{PREFIX}skills` · `{PREFIX}reload` workspace files (SOUL/AGENTS/TOOLS/skills)\n"
-    f"`{PREFIX}site [words]` learned websites + what it would answer from · `{PREFIX}info [question]` what the bot reads from info channels · `{PREFIX}version` running code version · `{PREFIX}backup` back up the database now\n"
+    f"`{PREFIX}brain [on|off|detect]` smart model + native tools · `{PREFIX}site [words]` learned websites + what it would answer from · `{PREFIX}info [question]` what the bot reads from info channels · `{PREFIX}version` running code version · `{PREFIX}backup` back up the database now\n"
     f"`{PREFIX}presence streaming [twitch url]` · `{PREFIX}statustext add|del|every` bot status\n"
     f"`{PREFIX}serverlog` every server + invite links (public or allowed) → CSV\n"
     f"`{PREFIX}smart <model|off>` stronger model for hard jobs · `{PREFIX}vision <model|off>` · `{PREFIX}audio <model|off>` · `{PREFIX}caps [model]` · `{PREFIX}history <n>`\n"
@@ -38,7 +38,7 @@ OWNER_CMDS = {"ohelp", "model", "fallback", "tokens", "temp", "turns", "think", 
               "limits", "limit", "usercap", "premium", "block", "unblock", "blockguild", "unblockguild",
               "pause", "resume", "resetall", "status", "servers", "leave", "sync",
               "memory", "smart", "vision", "audio", "caps", "history", "clearcache", "cleancommands", "reload", "soul", "version", "backup", "presence", "statustext", "serverlog",
-              "skills", "info", "site"}
+              "skills", "info", "site", "brain"}
 
 def _id(arg):
     m = re.search(r"\d{15,21}", arg or "")
@@ -250,6 +250,20 @@ async def owner_cmd(msg, cmd, arg):
         store.save_cfg()
         await presence.apply()
         return await send("**Status texts:**\n" + "\n".join(f"`{i}.` {t}" for i, t in enumerate(p.get("texts", []), 1)))
+    if cmd == "brain":
+        a = (arg or "").strip().lower()
+        if a in ("on", "off"):
+            cfg["brain"] = a == "on"
+            store.save_cfg()
+        elif a == "detect":
+            await ai.detect_brain_models()
+        elif a:
+            ai.BRAIN["models"] = ["g:" + m.removeprefix("g:") if "/" not in m and not m.startswith(("g:", "or:")) else m
+                                  for m in a.split(",") if m.strip()]
+        on = cfg.get("brain", True)
+        return await send(f"🧠 **Brain (native tool calling)**: {'on' if on else 'off'}\n"
+                          f"Models: {', '.join(f'`{m}`' for m in ai.BRAIN['models']) or 'none found'}\n"
+                          f"-# `{PREFIX}brain on|off|detect|<model,model>` · small talk still uses `{cfg['model']}`")
     if cmd == "site":
         if not msg.guild:
             return await send("Use this in a server.")

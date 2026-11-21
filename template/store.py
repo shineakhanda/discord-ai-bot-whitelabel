@@ -242,6 +242,7 @@ CREATE TABLE IF NOT EXISTS reminders (id INTEGER PRIMARY KEY AUTOINCREMENT, user
                                       guild_id INTEGER, due REAL, text TEXT);
 CREATE INDEX IF NOT EXISTS rem_due ON reminders (due);
 CREATE TABLE IF NOT EXISTS chat_ctx (key INTEGER, ts REAL, role TEXT, content TEXT);
+CREATE TABLE IF NOT EXISTS chat_summary (key INTEGER PRIMARY KEY, text TEXT, ts REAL);
 CREATE INDEX IF NOT EXISTS chat_ctx_key ON chat_ctx (key, ts);
 """)
 db.commit()
@@ -599,3 +600,12 @@ if _save_cfg_quiet:
                  cfg["max_tokens"], cfg["max_turns"], cfg["history_lines"])
     except Exception as e:
         log.warning("config upgrade save failed: %s", e)
+
+
+def summary_get(key):
+    row = db.execute("SELECT text FROM chat_summary WHERE key=?", (key,)).fetchone()
+    return row[0] if row else ""
+
+def summary_set(key, text):
+    db.execute("INSERT OR REPLACE INTO chat_summary (key, text, ts) VALUES (?, ?, ?)", (key, text[:2000], time.time()))
+    db.commit()

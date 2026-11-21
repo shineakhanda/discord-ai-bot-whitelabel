@@ -24,7 +24,7 @@ if _missing:
 
 from core import client, tree
 import agent                                    # built-in tools
-from features import panel_tools, panel_owner, announce, moderation, tickets, setup, chat, owner, presence, serverlog, ssh_tools, activities, webdata, profiles, sitebrain  # noqa: F401
+from features import panel_tools, panel_owner, announce, moderation, tickets, setup, chat, owner, presence, serverlog, ssh_tools, activities, webdata, profiles, sitebrain, skills_tools  # noqa: F401
 
 log.info("tools loaded: %d · skills: %s", len(agent.TOOLS), ", ".join(__import__("workspace").skills()))
 

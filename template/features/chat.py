@@ -62,7 +62,8 @@ async def respond(msg, text, ticket=False, auto=False):
                                                        people=ctx.people)
                 except discord.HTTPException:
                     recent = None
-            out = await think(ctx, text, msg.channel.id, media=media, recent=recent)
+            async with CHANNEL_LOCKS[msg.channel.id]:          # one run at a time per conversation (session queue)
+                out = await think(ctx, text, msg.channel.id, media=media, recent=recent)
             if cfg.get("human_delay") and prog.status is None:
                 await asyncio.sleep(min(2.2, 0.5 + len(out) / 700))
     except Silent as s:
@@ -190,6 +191,13 @@ async def reminder_loop():
 @on_startup
 async def lightpanda_install():
     await web.ensure_lightpanda()
+
+@on_startup
+async def find_brain_models():
+    await ai.detect_brain_models()
+
+from collections import defaultdict as _dd
+CHANNEL_LOCKS = _dd(asyncio.Lock)
 
 async def clean_old_commands():
     """Remove slash commands left on this application by a previous bot (e.g. Hermes agent / OpenClaw)."""

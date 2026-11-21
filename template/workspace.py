@@ -5,6 +5,7 @@ from store import BASE, DATA, guild, log
 
 WS = os.path.join(BASE, "workspace")
 SKILLS_DIR = os.path.join(WS, "skills")
+USER_SKILLS_DIR = os.path.join(DATA, "skills")      # skills taught from Discord (survive updates; override built-ins)
 NOTES_DIR = os.path.join(DATA, "notes")            # daily audit notes (runtime data, not in git)
 BOOT_FILES = ["IDENTITY.md", "SOUL.md", "AGENTS.md", "TOOLS.md"]
 os.makedirs(NOTES_DIR, exist_ok=True)
@@ -90,16 +91,42 @@ def skills():
     """{name: (description, path)} from workspace/skills/*/SKILL.md (frontmatter name/description)."""
     if _skills:
         return _skills
-    if os.path.isdir(SKILLS_DIR):
-        for d in sorted(os.listdir(SKILLS_DIR)):
-            path = os.path.join(SKILLS_DIR, d, "SKILL.md")
+    for root in (SKILLS_DIR, USER_SKILLS_DIR):        # later roots win (like OpenClaw: workspace > bundled)
+        if not os.path.isdir(root):
+            continue
+        for d in sorted(os.listdir(root)):
+            path = os.path.join(root, d, "SKILL.md")
             if not os.path.exists(path):
                 continue
             text = open(path, encoding="utf-8").read()
             m = re.match(r"---\s*\n(.*?)\n---", text, re.S)
             meta = dict(re.findall(r"^(\w+):\s*(.+)$", m.group(1), re.M)) if m else {}
-            _skills[meta.get("name", d)] = (meta.get("description", "").strip(), path)
+            _skills[meta.get("name", d).strip().strip('"').lower()] = (meta.get("description", "").strip().strip('"'),
+                                                                     path)
     return _skills
+
+def save_skill(name, description, body):
+    """Write a skill taught from Discord to data/skills/<name>/SKILL.md (kept across updates)."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")[:40]
+    if not slug:
+        raise ValueError("bad skill name")
+    d = os.path.join(USER_SKILLS_DIR, slug)
+    os.makedirs(d, exist_ok=True)
+    desc = " ".join(description.split())[:300]
+    with open(os.path.join(d, "SKILL.md"), "w", encoding="utf-8") as f:
+        f.write(f"---\nname: {slug}\ndescription: {desc}\n---\n\n{body.strip()}\n")
+    _skills.clear()
+    return slug
+
+def delete_skill(name):
+    import shutil
+    slug = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
+    d = os.path.join(USER_SKILLS_DIR, slug)
+    if not os.path.isdir(d):
+        return False
+    shutil.rmtree(d)
+    _skills.clear()
+    return True
 
 def skill_body(name):
     s = skills().get(name.strip().lower())
@@ -164,8 +191,9 @@ def build_prompt(*, gid, text, user_name, is_owner, roles, profile, facts, tool_
         parts.append("# Tools available right now\n" + "\n".join(f"- {t}" for t in tool_lines))
     sk = skills()
     if sk:
-        parts.append("# Skills (load with `TOOL: skill | <name>` before multi-step work)\n"
-                     + "\n".join(f"- {n}: {d}" for n, (d, _) in sk.items()))
+        parts.append("# Skills\nBefore multi-step work, load the matching skill with the `skill` tool and follow it.\n"
+                     "<available_skills>\n" + "\n".join(f"  <skill><name>{n}</name><description>{d[:220]}</description>"
+                                                       f"</skill>" for n, (d, _) in sk.items()) + "\n</available_skills>")
 
     now = time.time()
     who = [f"# Right now",
