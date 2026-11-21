@@ -67,13 +67,32 @@ def product_answer(gid, text):
     return "\n".join(lines)
 
 
+INSTRUCTION = re.compile(r"^(you|u)\b|\byou (are|must|should|know|can)\b|\bbehave\b|\bpolite|\bact as\b|\bnever say\b|\balways (say|reply|answer)\b|\bsystem prompt\b", re.I)
+RULE_TOPIC = re.compile(r"charge|fee|discount|% ?off|vat|tax|ticket|maintenance|rate", re.I)
+PCT_FEE = re.compile(r"\d+(\.\d+)?\s*%.*(charge|fee)|(charge|fee).*\d+(\.\d+)?\s*%", re.I)
+
+
 def _rules(gid):
-    """The server's own price rules (charges, discounts, how to buy) saved by admins, as short notes."""
+    """Customer-facing price rules (charges, discounts, how to buy) saved by admins.
+    Staff instructions are never shown, and when several lines set a % fee the newest one wins."""
     if not gid:
         return ""
-    lines = [l.strip(" -•") for l in (store.guild(gid).get("knowledge") or "").splitlines()]
-    keep = [l for l in lines if re.search(r"charge|fee|discount|% ?off|vat|tax|ticket|maintenance|rate", l, re.I)][:3]
-    return "".join(f"\n• {l[:160]}" for l in keep)
+    raw = (store.guild(gid).get("knowledge") or "").replace("\r", "")
+    parts = []
+    for line in raw.splitlines():
+        for sent in re.split(r"(?<=[.!?])\s+", line.strip(" -•\t")):
+            sent = sent.strip(" -•.")
+            if sent and RULE_TOPIC.search(sent) and not INSTRUCTION.search(sent):
+                parts.append(sent)
+    fees = [p for p in parts if PCT_FEE.search(p)]
+    if len(fees) > 1:  # newest fee rule replaces older ones
+        parts = [p for p in parts if p not in fees[:-1]]
+    seen, keep = set(), []
+    for p in parts:
+        k = p.lower()
+        if k not in seen:
+            seen.add(k); keep.append(p)
+    return "".join(f"\n• {l[:160]}" for l in keep[:3])
 
 
 def _tz(gid):
