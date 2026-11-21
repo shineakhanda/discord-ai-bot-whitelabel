@@ -120,6 +120,10 @@ if cfg.get("cfg_version", 1) < 2:
     _save_cfg_quiet = True
 else:
     _save_cfg_quiet = False
+if cfg.get("cfg_version", 1) < 3:          # v3: Gemma is the default brain everywhere (Gemini only if chosen)
+    cfg["brain"] = "gemma"
+    cfg["cfg_version"] = 3
+    _save_cfg_quiet = True
 
 def _switch_provider():
     """When the main AI provider changes (e.g. OpenRouter -> numes.ai), pick a model that exists there.

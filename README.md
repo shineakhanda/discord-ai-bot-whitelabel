@@ -59,6 +59,8 @@ It covers every slash command, owner command, setting and troubleshooting step. 
 | `vibe`, `style` | Personality, one line each. |
 | `color` | Embed colour, e.g. `#7C3AED`. |
 | `website`, `stream_url` | Used in status texts and the streaming link. |
+| `focus` | What the bot does: `support` / `store` (default — customer support & sales), `hosting` (support + server/VPS checks) or `all` (every feature, like Kashem). |
+| `job` | One line describing its job, e.g. `"Cave Cloud hosting sales & support"`. |
 
 To rebrand later, change `brand.json` and restart. For deeper personality, edit `template/workspace/SOUL.md` and `IDENTITY.md`.
 

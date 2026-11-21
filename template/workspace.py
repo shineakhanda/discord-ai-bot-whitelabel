@@ -189,6 +189,16 @@ def build_prompt(*, gid, text, user_name, is_owner, roles, profile, facts, tool_
 
     if tool_lines:
         parts.append("# Tools available right now\n" + "\n".join(f"- {t}" for t in tool_lines))
+    focus = (os.environ.get("BOT_FOCUS") or "all").lower()
+    if focus != "all":
+        job = os.environ.get("BOT_JOB") or {
+            "hosting": "hosting sales & customer support (VPS, dedicated/bare metal, web & game hosting, domains)",
+        }.get(focus, "store / customer support & sales")
+        parts.append("# Your job (stay focused)\n"
+                     f"You are this server's {job} staff. Everything you do serves that: answer customers about "
+                     "products, plans, prices, stock, orders, payments, delivery and problems; guide buyers to order "
+                     "(ticket); keep the server safe. Off-topic requests (homework, coding help, games, trivia, general "
+                     "knowledge, jokes): one friendly line, then steer back to how you can help with the store/service.")
     sk = skills()
     if sk:
         parts.append("# Skills\nBefore multi-step work, load the matching skill with the `skill` tool and follow it.\n"

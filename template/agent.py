@@ -5,7 +5,7 @@ from typing import Callable, Optional
 
 import discord
 
-import store, ai, web, workspace, brain
+import store, ai, web, workspace, brain, passive
 from store import cfg, log
 from core import client, feature, is_owner, chunks, EMOJI_RE
 
@@ -61,9 +61,27 @@ def tool(name, usage, desc, when=lambda c: True, progress="⚙️ Working…", h
         return fn
     return deco
 
+# ---------- focus: __BOT_NAME__ does everything; branded bots stick to one job (brand.json "focus") ----------
+import os as _os
+FOCUS = (_os.environ.get("BOT_FOCUS") or "all").strip().lower()
+_SUPPORT = {"calc", "channel", "read", "search", "history", "skill", "remember", "forget", "profile", "learn_server",
+            "unlearn_server", "save_instruction", "learn_site", "forget_site", "screenshot", "web_extract", "watch_page",
+            "remind", "announce_drafts", "announce_post", "schedule_add", "schedule_list", "schedule_cancel",
+            "create_skill", "delete_skill", "mod_warn", "mod_warnings", "mod_cases", "mod_timeout", "mod_untimeout",
+            "mod_purge", "mod_slowmode", "mod_lock", "mod_kick", "mod_ban"}
+_HOSTING = _SUPPORT | {"server_status", "panel_list", "panel_logs", "panel_server_find", "panel_nodes", "ssh_hosts",
+                       "ssh_check", "vps_connect"}
+FOCUS_TOOLS = {"support": _SUPPORT, "store": _SUPPORT, "sales": _SUPPORT, "hosting": _HOSTING}
+
+def focus_allows(name):
+    allowed = FOCUS_TOOLS.get(FOCUS)
+    return allowed is None or name in allowed
+
 def available(ctx):
     out = []
     for t in TOOLS.values():
+        if not focus_allows(t.name):
+            continue
         try:
             if t.when(ctx):
                 out.append(t)
@@ -419,7 +437,8 @@ FAKE_ACTION = re.compile(
     r"i will (now )?(go|move|proceed|head) to|get back to you|let me (double-)?check|i'?ll (check|look into) (it|this|that)|"
     r"ek ?(minute|min|second|sec|muhurto) (darao|daran|wait|opekkha)|check kore (bolchi|janacchi|jabo)|"
     r"dekhe (bolchi|janacchi|dicchi)|ekhon(i)? check kor|অপেক্ষা করুন|এক মিনিট|দেখে বলছি)", re.I)
-CANT_RE = re.compile(r"(can'?t|cannot|unable to|not able to|don'?t have (the )?(ability|access)|no (direct )?access|"
+CANT_RE = re.compile(r"(can'?t|cannot|unable to|not able to|don'?t have (the )?(ability|access|permission)|no (direct )?"
+                     r"access|i('m| am) (just )?an ai|as an ai|i do not have (real-time|live|direct)|"
                      r"parchi na|parini|pari na|ক্ষমতা নেই|পারছি না|পারি না|সম্ভব না).{0,60}"
                      r"(brows|access|read|open|scrap|scan|see|load|ব্রাউজ|সাইট|ওয়েব|website|site|page|link)|"
                      r"(website|site|page|scan|brows|data).{0,80}(korte parchi na|parchi na|parini|can'?t|cannot|"
@@ -428,6 +447,11 @@ CANT_RE = re.compile(r"(can'?t|cannot|unable to|not able to|don'?t have (the )?(
 CANT_NOTE = ("You DID open the page with your browser in this reply — its real content is in the Tool result above. "
              "Never say you can't browse. Answer from that content: list what's there (products, prices, info). If the "
              "specific thing isn't in it, say it isn't on that page and suggest the exact page/section to check.")
+NO_ACCESS_NOTE = ("Wrong: you DO have access. Your tools: `channel` reads any channel of this server, `read` opens any "
+                  "link or website (JavaScript sites too), `history` reads earlier chat here, `learn_site` saves a "
+                  "website, `search` searches the web, plus the server's info and saved website data above. Never say "
+                  "you can't see or access something — call the right tool NOW (function call or `TOOL: name | input`), "
+                  "then answer from the result. If a tool truly fails, say exactly what failed.")
 ROLE_SLIP = re.compile(r"you can (respond|reply|say|answer)|here are (some|a few|\d) (options|ways|replies|responses)|"
                        r"\boption [1-3]\b|which one fits|depending on how you want|you could (reply|respond|say)|"
                        r"it looks like you are continuing|if you (want|wish) to (reply|respond)|suggested repl", re.I)
@@ -681,6 +705,27 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
              "data you already have; answer from it. Quote names, specs and prices exactly as written (same currency). "
              "Never invent or change prices. If the answer truly isn't here, say which channel to check.\n\n"
              if loaded else "") + info))
+    # the user gave a source (link, channel, a learned website, the server's info) -> use THAT, not a web search
+    own_source = bool(web.URL_RE.search(text or "") or refs or (sb and ctx.gid and "🌐 used saved website" in pre_steps)
+                      or (info and info.startswith("## ")))
+    if own_source and "search" in names:
+        tools_now = [t for t in tools_now if t.name != "search"]
+        names = {t.name for t in tools_now}
+        msgs.append(_note("The user pointed to a specific source (a link, a Discord channel, the server's website or "
+                          "info channels). Answer from THAT source with `read` / `channel` / the data above. Do not "
+                          "web-search instead."))
+    # passive: exact answers the code can give without any AI (one plan/product price, sums, time, weather)
+    if not pre_notes and not (media and (media[1] or media[2])) and cfg.get("passive", True):
+        try:
+            pa = await passive.answer(ctx, strip_trigger(text), info, run_tool)
+        except Exception as e:
+            pa = None
+            log.info("passive answer skipped: %s", e)
+        if pa:
+            reply, label = pa
+            log.info("passive answer (%s)", label)
+            ai.remember(key, f"{user.display_name}: {text}", reply)
+            return reply if "\n-# " in reply else reply + f"\n-# {label}"
     steps, urls = list(pre_steps), []
     for n in pre_notes:
         msgs.append(_note(n))
@@ -795,8 +840,7 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
 
     # ---- OpenClaw-style loop: native, typed tool calls (several at once) on the brain model ----
     native_done = False
-    if ai.BRAIN["models"] and cfg.get("brain", True) and text and not brain.CHAT_RE.match(text) \
-            and len(text.strip()) >= 4:
+    if ai.brain_models() and text and not brain.CHAT_RE.match(text) and len(text.strip()) >= 4:
         try:
             reply = await native_loop(ctx, msgs, tools_now, names, act, show, steps, text, max_steps)
             native_done = reply is not None
@@ -824,11 +868,11 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
                 tools_used = -1                     # only once
                 fallback_reply = fallback_reply or reply
                 continue
-            if not cant_fixed and step <= max_steps and any(x.startswith(("📖", "🔎", "📸", "🌐")) for x in steps) \
-                    and CANT_RE.search(reply):
+            if not cant_fixed and step <= max_steps and CANT_RE.search(reply):
                 cant_fixed = True
-                log.info("reply said it can't browse after a successful read, asking again")
-                msgs += [{"role": "assistant", "content": reply}, _check(CANT_NOTE)]
+                read_ok = any(x.startswith(("📖", "🔎", "📸", "🌐")) for x in steps)
+                log.info("reply made a no-access excuse, asking again")
+                msgs += [{"role": "assistant", "content": reply}, _check(CANT_NOTE if read_ok else NO_ACCESS_NOTE)]
                 fallback_reply = fallback_reply or reply
                 continue
             if not role_fixed and step <= max_steps and ROLE_SLIP.search(reply):
@@ -896,6 +940,7 @@ async def native_loop(ctx, msgs, tools_now, names, act, show, steps, text, max_s
     specs = [tool_schema(t)[0] for t in tools_now]
     # one system message (prompt + every note), then the conversation, then the user's message
     system = "\n\n".join(m["content"] for m in msgs if m["role"] == "system" and isinstance(m["content"], str))
+    system = re.sub(r"# Tools available right now\n(?:- .*\n?)*", "", system)   # they're in the tool schemas
     convo = [m for m in msgs if m["role"] in ("user", "assistant")]
     nmsgs = [{"role": "system", "content": system + "\n\n# Tools\nCall tools with the function-calling API "
               "(you may call several at once). Never write tool calls as text. After tool results, answer the user."},
@@ -925,9 +970,9 @@ async def native_loop(ctx, msgs, tools_now, names, act, show, steps, text, max_s
         note = None
         if not used and not flags["fake"] and FAKE_ACTION.search(reply):
             flags["fake"], note = True, FAKE_ACTION_NOTE
-        elif not flags["cant"] and (used or any(x.startswith(("📖", "🔎", "📸", "🌐")) for x in steps)) \
-                and CANT_RE.search(reply):
-            flags["cant"], note = True, CANT_NOTE
+        elif not flags["cant"] and CANT_RE.search(reply):
+            flags["cant"] = True
+            note = CANT_NOTE if (used or any(x.startswith(("📖", "🔎", "📸", "🌐")) for x in steps)) else NO_ACCESS_NOTE
         elif not flags["role"] and ROLE_SLIP.search(reply):
             flags["role"], note = True, ROLE_NOTE
         elif not flags["ground"]:

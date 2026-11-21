@@ -517,7 +517,7 @@ async def _call_tools(model, messages, tools, max_tokens, temperature):
         raise APIError(401, "no API key")
     payload = {"model": mid, "messages": messages, "max_tokens": max_tokens, "tools": tools,
                "tool_choice": "auto", "temperature": 0.4 if temperature is None else temperature}
-    if "googleapis.com" in base:
+    if "googleapis.com" in base and "gemini" in mid:
         payload["reasoning_effort"] = "low"          # Gemini: a little thinking helps tool choice, stays fast
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     async with HTTP["s"].post(f"{base}/chat/completions", json=payload, headers=headers,
@@ -558,10 +558,23 @@ async def _call_tools(model, messages, tools, max_tokens, temperature):
     return text, calls, assistant
 
 
+GEMMA_BRAIN = ["g:gemma-4-26b-a4b-it", "g:gemma-4-31b-it"]
+
+def brain_models():
+    """Models for the native tool loop. cfg['brain']: 'gemma' (default) | 'gemini' | 'off'."""
+    mode = str(cfg.get("brain", "gemma")).lower()
+    if mode in ("off", "false", "0"):
+        return []
+    if mode in ("gemini", "true", "1", "on") and BRAIN["models"]:
+        return list(BRAIN["models"]) + [m for m in GEMMA_BRAIN if m not in BRAIN["models"]]
+    main = cfg["model"] if cfg["model"].startswith("g:") else None
+    out = [m for m in dict.fromkeys([main, *GEMMA_BRAIN]) if m and m not in _no_tools]
+    return out if GOOGLE_AI_KEY else []
+
 async def ask_tools(messages, tools, models=None, max_tokens=None, temperature=None):
     """One agent step with native tool calls. Returns (text, calls, assistant_message, model).
     Tries the brain models in order; raises if none can do it (caller falls back to text tools)."""
-    order = [m for m in (models or BRAIN["models"]) if m not in _no_tools]
+    order = [m for m in (models or brain_models()) if m not in _no_tools]
     mods = [m for m in order if not _skip(m)] or order[:1]
     errors = []
     for m in mods:

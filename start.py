@@ -78,6 +78,10 @@ if __name__ == "__main__":
     ensure_packages()
     load_env(os.path.join(ROOT, ".env"))
     os.environ.setdefault("DATA_DIR", os.path.join(ROOT, "data"))
+    _b = json.load(open(os.path.join(ROOT, "brand.json"), encoding="utf-8"))
+    os.environ.setdefault("BOT_FOCUS", str(_b.get("focus") or "support"))   # support | store | hosting | all
+    if _b.get("job"):
+        os.environ.setdefault("BOT_JOB", str(_b["job"]))
     v = render()
     print(f"[{v['__BOT_NAME__']}] rendered from brand.json · {WATERMARK}", flush=True)
     os.chdir(APP)

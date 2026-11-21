@@ -27,7 +27,7 @@ OWNER_HELP = (
     f"`{PREFIX}premium <guild_id> on|off` · `{PREFIX}block|unblock <user>` · `{PREFIX}blockguild|unblockguild <id>`\n"
     f"`{PREFIX}memory [add <rule>|del <n>|clear]` standing instructions (workspace/MEMORY.md)\n"
     f"`{PREFIX}soul` · `{PREFIX}skills` · `{PREFIX}reload` workspace files (SOUL/AGENTS/TOOLS/skills)\n"
-    f"`{PREFIX}brain [on|off|detect]` smart model + native tools · `{PREFIX}site [words]` learned websites + what it would answer from · `{PREFIX}info [question]` what the bot reads from info channels · `{PREFIX}version` running code version · `{PREFIX}backup` back up the database now\n"
+    f"`{PREFIX}brain [gemma|gemini|off]` which model runs tools · `{PREFIX}site [words]` learned websites + what it would answer from · `{PREFIX}info [question]` what the bot reads from info channels · `{PREFIX}version` running code version · `{PREFIX}backup` back up the database now\n"
     f"`{PREFIX}presence streaming [twitch url]` · `{PREFIX}statustext add|del|every` bot status\n"
     f"`{PREFIX}serverlog` every server + invite links (public or allowed) → CSV\n"
     f"`{PREFIX}smart <model|off>` stronger model for hard jobs · `{PREFIX}vision <model|off>` · `{PREFIX}audio <model|off>` · `{PREFIX}caps [model]` · `{PREFIX}history <n>`\n"
@@ -252,18 +252,16 @@ async def owner_cmd(msg, cmd, arg):
         return await send("**Status texts:**\n" + "\n".join(f"`{i}.` {t}" for i, t in enumerate(p.get("texts", []), 1)))
     if cmd == "brain":
         a = (arg or "").strip().lower()
-        if a in ("on", "off"):
-            cfg["brain"] = a == "on"
+        if a in ("gemma", "gemini", "off"):
+            cfg["brain"] = a
             store.save_cfg()
         elif a == "detect":
             await ai.detect_brain_models()
-        elif a:
-            ai.BRAIN["models"] = ["g:" + m.removeprefix("g:") if "/" not in m and not m.startswith(("g:", "or:")) else m
-                                  for m in a.split(",") if m.strip()]
-        on = cfg.get("brain", True)
-        return await send(f"🧠 **Brain (native tool calling)**: {'on' if on else 'off'}\n"
-                          f"Models: {', '.join(f'`{m}`' for m in ai.BRAIN['models']) or 'none found'}\n"
-                          f"-# `{PREFIX}brain on|off|detect|<model,model>` · small talk still uses `{cfg['model']}`")
+        mode = cfg.get("brain", "gemma")
+        return await send(f"🧠 **Brain**: `{mode}` → {', '.join(f'`{m}`' for m in ai.brain_models()) or 'text tools only'}\n"
+                          f"Gemini models on this key: {', '.join(f'`{m}`' for m in ai.BRAIN['models']) or 'none'}\n"
+                          f"-# `{PREFIX}brain gemma|gemini|off|detect` — gemma = default (free, high limit), "
+                          f"gemini = smarter but lower daily limit")
     if cmd == "site":
         if not msg.guild:
             return await send("Use this in a server.")
