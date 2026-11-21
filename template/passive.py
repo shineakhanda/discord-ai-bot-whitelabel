@@ -72,6 +72,9 @@ RULE_TOPIC = re.compile(r"charge|fee|discount|% ?off|vat|tax|ticket|maintenance|
 PCT_FEE = re.compile(r"\d+(\.\d+)?\s*%.*(charge|fee)|(charge|fee).*\d+(\.\d+)?\s*%", re.I)
 
 
+CONDITIONAL = re.compile(r"\bno\b|without|except|waiv|free|\bif\b|only|month|year|first", re.I)
+
+
 def _rules(gid):
     """Customer-facing price rules (charges, discounts, how to buy) saved by admins.
     Staff instructions are never shown, and when several lines set a % fee the newest one wins."""
@@ -84,7 +87,8 @@ def _rules(gid):
             sent = sent.strip(" -•.")
             if sent and RULE_TOPIC.search(sent) and not INSTRUCTION.search(sent):
                 parts.append(sent)
-    fees = [p for p in parts if PCT_FEE.search(p)]
+    # only general fee rules replace each other; conditional ones ("3-month orders have no fee") stay
+    fees = [p for p in parts if PCT_FEE.search(p) and not CONDITIONAL.search(p)]
     if len(fees) > 1:  # newest fee rule replaces older ones
         parts = [p for p in parts if p not in fees[:-1]]
     seen, keep = set(), []
@@ -92,7 +96,7 @@ def _rules(gid):
         k = p.lower()
         if k not in seen:
             seen.add(k); keep.append(p)
-    return "".join(f"\n• {l[:160]}" for l in keep[:3])
+    return "".join(f"\n• {l[:160]}" for l in keep[:4])
 
 
 def _tz(gid):
