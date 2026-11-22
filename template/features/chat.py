@@ -193,6 +193,11 @@ async def lightpanda_install():
     await web.ensure_lightpanda()
 
 @on_startup
+async def chrome_install():
+    import browser
+    asyncio.create_task(browser.ensure_chrome())     # first start downloads ~90 MB in the background
+
+@on_startup
 async def find_brain_models():
     await ai.detect_brain_models()
 

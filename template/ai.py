@@ -179,6 +179,8 @@ async def pick_model(need):
         m = cfg.get(key) if key else ""
         if m and set(need) <= await model_inputs(m):
             return [m]
+    if set(need) <= {"image", "text"} and GOOGLE_AI_KEY:          # Gemma 4 sees images
+        return ["g:gemma-4-26b-a4b-it", "g:gemma-4-31b-it"]
     return []
 
 def clear_caps():
@@ -511,12 +513,16 @@ async def detect_brain_models():
     return BRAIN["models"]
 
 
-async def _call_tools(model, messages, tools, max_tokens, temperature):
+_no_required = set()      # models that reject tool_choice="required"
+
+async def _call_tools(model, messages, tools, max_tokens, temperature, tool_choice="auto"):
     base, key, mid, is_or = provider(model)
     if not key:
         raise APIError(401, "no API key")
+    if tool_choice == "required" and model in _no_required:
+        tool_choice = "auto"
     payload = {"model": mid, "messages": messages, "max_tokens": max_tokens, "tools": tools,
-               "tool_choice": "auto", "temperature": 0.4 if temperature is None else temperature}
+               "tool_choice": tool_choice, "temperature": 0.4 if temperature is None else temperature}
     if "googleapis.com" in base and "gemini" in mid:
         payload["reasoning_effort"] = "low"          # Gemini: a little thinking helps tool choice, stays fast
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -540,6 +546,10 @@ async def _call_tools(model, messages, tools, max_tokens, temperature):
             status = r.status
         if status != 200 or not isinstance(data, dict) or not data.get("choices"):
             err = (data.get("error") or {}).get("message", str(data))[:300] if isinstance(data, dict) else str(data)
+            if status == 400 and tool_choice != "auto" and re.search(r"tool_choice|required|mode", err, re.I):
+                _no_required.add(model)
+                log.info("%s doesn't accept forced tool calls; using auto", model)
+                return await _call_tools(model, messages, tools, max_tokens, temperature, "auto")
             raise APIError(status, err)
     msg = data["choices"][0].get("message") or {}
     calls = []
@@ -571,7 +581,7 @@ def brain_models():
     out = [m for m in dict.fromkeys([main, *GEMMA_BRAIN]) if m and m not in _no_tools]
     return out if GOOGLE_AI_KEY else []
 
-async def ask_tools(messages, tools, models=None, max_tokens=None, temperature=None):
+async def ask_tools(messages, tools, models=None, max_tokens=None, temperature=None, tool_choice="auto"):
     """One agent step with native tool calls. Returns (text, calls, assistant_message, model).
     Tries the brain models in order; raises if none can do it (caller falls back to text tools)."""
     order = [m for m in (models or brain_models()) if m not in _no_tools]
@@ -580,7 +590,8 @@ async def ask_tools(messages, tools, models=None, max_tokens=None, temperature=N
     for m in mods:
         t0 = time.monotonic()
         try:
-            text, calls, amsg = await _call_tools(m, messages, tools, max_tokens or cfg["max_tokens"], temperature)
+            text, calls, amsg = await _call_tools(m, messages, tools, max_tokens or cfg["max_tokens"], temperature,
+                                                  tool_choice)
             log.info("brain step from %s in %.1fs (%d tool call%s)", m, time.monotonic() - t0, len(calls),
                      "" if len(calls) == 1 else "s")
             return fix_script(text), calls, amsg, m

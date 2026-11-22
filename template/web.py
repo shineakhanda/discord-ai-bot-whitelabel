@@ -279,7 +279,24 @@ def looks_empty(text):
     return len(t) < 400 or (len(t) < 2500 and bool(SHELL_RE.search(t)))
 
 def browser_name():
-    return "Lightpanda" if LP["path"] else "HTTP reader"
+    import browser
+    return "headless Chrome" if browser.ready() else "Lightpanda" if LP["path"] else "HTTP reader"
+
+async def _chrome(url):
+    """(title, text, data) from real headless Chrome, or None when it isn't available / fails."""
+    import browser
+    if not browser.ready():
+        return None
+    try:
+        data = await asyncio.wait_for(browser.render(url), 60)
+    except BlockedURL:
+        raise
+    except Exception as e:
+        if "private network" in str(e):
+            raise BlockedURL(str(e))
+        log.warning("chrome failed for %s: %s", url, e)
+        return None
+    return data.get("title") or "", browser.as_text(data), data
 
 _page_cache = {}
 
@@ -323,7 +340,10 @@ async def _read_any(url, limit=60000):
         return hit[1], hit[2]
     url = await final_url(url)                         # also blocks private / local addresses
     title, text, how = "", "", ""
-    if LP["path"]:
+    got = await _chrome(url)
+    if got and not looks_empty(got[1]):
+        title, text, how = got[0], squeeze(got[1]), "chrome"
+    if not text and LP["path"]:
         try:
             md = await _lightpanda(url)
             m = re.search(r"^#\s+(.+)$", md, re.M)
@@ -407,6 +427,9 @@ class _Tables(HTMLParser):
 async def read_raw(url, limit=60000):
     """Full page content (JavaScript run, tables kept) for data extraction. Returns (final_url, title, text)."""
     url = await final_url(url.rstrip(").,!?>"))
+    got = await _chrome(url)
+    if got and not looks_empty(got[1]):
+        return got[2].get("url") or url, got[0], got[1][:limit]
     if LP["path"]:
         try:
             md = await _lightpanda(url)
@@ -436,6 +459,12 @@ async def read_raw(url, limit=60000):
 async def screenshot(url):
     """PNG of a public page (after its JavaScript ran). Returns (final_url, png_bytes)."""
     url = await final_url(url.rstrip(").,!?>"))
+    import browser
+    if browser.ready():
+        try:
+            return await asyncio.wait_for(browser.page_shot(url), 70)
+        except Exception as e:
+            log.info("chrome screenshot failed: %s", e)
     if LP["path"]:
         try:
             async with _lp_sem:

@@ -68,7 +68,9 @@ _SUPPORT = {"calc", "channel", "read", "search", "history", "skill", "remember",
             "unlearn_server", "save_instruction", "learn_site", "forget_site", "screenshot", "web_extract", "watch_page",
             "remind", "announce_drafts", "announce_post", "schedule_add", "schedule_list", "schedule_cancel",
             "create_skill", "delete_skill", "mod_warn", "mod_warnings", "mod_cases", "mod_timeout", "mod_untimeout",
-            "mod_purge", "mod_slowmode", "mod_lock", "mod_kick", "mod_ban"}
+            "mod_purge", "mod_slowmode", "mod_lock", "mod_kick", "mod_ban", "browse", "page_items", "look", "run_steps",
+            "embed_post", "reply_save", "saved_reply", "staff_note", "member_info", "handoff", "ticket_summary",
+            "mod_role", "mod_nick", "mod_unban", "mod_softban"}
 _HOSTING = _SUPPORT | {"server_status", "panel_list", "panel_logs", "panel_server_find", "panel_nodes", "ssh_hosts",
                        "ssh_check", "vps_connect"}
 FOCUS_TOOLS = {"support": _SUPPORT, "store": _SUPPORT, "sales": _SUPPORT, "hosting": _HOSTING}
@@ -452,6 +454,46 @@ NO_ACCESS_NOTE = ("Wrong: you DO have access. Your tools: `channel` reads any ch
                   "website, `search` searches the web, plus the server's info and saved website data above. Never say "
                   "you can't see or access something — call the right tool NOW (function call or `TOOL: name | input`), "
                   "then answer from the result. If a tool truly fails, say exactly what failed.")
+HESITATE = re.compile(
+    r"(can'?t|cannot|can not|unable to|not able to|i'?m not allowed|not possible for me|beyond my|outside (of )?my|"
+    r"i don'?t have (the )?(ability|capability|tools?|permission|access|a way)|i have no (way|tool|access)|"
+    r"i('m| am) (just )?(an ai|a bot|a language model|only a)|as an ai|you (can|could|should|may) (try|check|visit|"
+    r"contact|ask)|i (would|will) need (you to|more)|i (recommend|suggest) (you )?(check|visit|contact)|"
+    r"parbo na|parchi na|parini|pari na|সম্ভব না|পারব না|পারছি না|পারি না|জানি না).{0,70}"
+    r"(do|help|perform|make|create|send|post|ban|kick|mute|time ?out|warn|check|find|see|view|open|look|read|browse|"
+    r"visit|access|tell|show|verify|confirm|give|add|remove|delete|embed|announce|summar|calculat|remind|stock|price|"
+    r"image|photo|screenshot|website|site|channel|link|that|this|it|korte|dekh|bol)", re.I | re.S)
+PROMISE = re.compile(r"\b(let me (check|look|see|find|open|verify)|i('ll| will) (check|look|find|open|verify|get back)|"
+                     r"checking (now|that)|one (moment|sec|second)|give me a (moment|sec|minute)|hold on|"
+                     r"ekto (wait|opekkha)|dekhe (bolchi|janacchi)|check kore (bolchi|janacchi|dicchi))", re.I)
+TOOL_HINTS = [
+    (r"\bunban\b", ["mod_unban"]), (r"\bsoft ?ban\b", ["mod_softban"]), (r"\bban\b", ["mod_ban"]),
+    (r"\bkick\b", ["mod_kick"]), (r"time ?out|\bmute\b", ["mod_timeout"]), (r"\bwarn", ["mod_warn"]),
+    (r"purge|delete (the )?(last )?\d* ?messages|clear (the )?chat", ["mod_purge"]), (r"\broles?\b", ["mod_role"]),
+    (r"nick", ["mod_nick"]), (r"embed", ["embed_post"]), (r"announce", ["announce_drafts"]), (r"remind", ["remind"]),
+    (r"stock|available|in.?stock|sold.?out|ache ki|ase ki|আছে", ["page_items", "browse"]),
+    (r"https?://|www\.|\.(com|xyz|net|org|io|bd|dev|gg|store|shop)\b|website|site\b", ["browse", "read", "page_items"]),
+    (r"<#\d+>|#[\w-]+|channel", ["channel"]), (r"photo|image|picture|screenshot|\bss\b|chobi|ছবি", ["look"]),
+    (r"weather|abohawa", ["weather"]), (r"\b(search|google|news|latest)\b", ["search"]),
+    (r"\d\s*[-+*/x×%]\s*\d|total|calculate|hisab", ["calc"]),
+    (r"refund|payment|paid|delivery|human|staff|admin|owner|manager", ["handoff", "saved_reply"]),
+    (r"summar", ["ticket_summary"]), (r"who is|member info|account age|lookup", ["member_info"]),
+    (r"giveaway", ["giveaway_start"]), (r"\bpoll\b", ["poll_create"]),
+    (r"server (status|is down|offline)|\bram\b|\bcpu\b|panel", ["server_status", "panel_logs"]),
+    (r"price|dam|koto|cost|plan|package", ["channel", "page_items"]),
+]
+
+def relevant_tools(text, names):
+    out = []
+    for pat, tools in TOOL_HINTS:
+        if re.search(pat, text or "", re.I):
+            out += [t for t in tools if t in names and t not in out]
+    return out
+
+ACTION_ASK = re.compile(r"\b(ban|kick|timeout|time out|mute|warn|purge|unban|softban|give .{0,20}role|remove .{0,20}role|"
+                        r"post|send|announce|embed|remind|check|open|visit|look at|browse|summari[sz]e|lookup|"
+                        r"dekho|dekh|check koro|khulo|pathao|post koro)\b", re.I)
+
 ROLE_SLIP = re.compile(r"you can (respond|reply|say|answer)|here are (some|a few|\d) (options|ways|replies|responses)|"
                        r"\boption [1-3]\b|which one fits|depending on how you want|you could (reply|respond|say)|"
                        r"it looks like you are continuing|if you (want|wish) to (reply|respond)|suggested repl", re.I)
@@ -868,6 +910,17 @@ async def think(ctx, text, key, *, force_query=None, media=None, recent=None):
                 tools_used = -1                     # only once
                 fallback_reply = fallback_reply or reply
                 continue
+            hint_t = relevant_tools(text, names)
+            if hint_t and not cant_fixed and step <= max_steps and (HESITATE.search(reply) or
+                                                                     (tools_used <= 0 and PROMISE.search(reply))):
+                cant_fixed = True
+                log.info("reply hesitated although tools fit (%s), asking again", ", ".join(hint_t[:3]))
+                msgs += [{"role": "assistant", "content": reply},
+                         _check("STOP — no excuses. You have tools for this: " + ", ".join(hint_t[:5]) +
+                                ". Call the right one now, on its own line: `TOOL: <name> | <input>`. Then answer "
+                                "from the result. Never say you can't or tell them to do it themselves.")]
+                fallback_reply = fallback_reply or reply
+                continue
             if not cant_fixed and step <= max_steps and CANT_RE.search(reply):
                 cant_fixed = True
                 read_ok = any(x.startswith(("📖", "🔎", "📸", "🌐")) for x in steps)
@@ -945,11 +998,15 @@ async def native_loop(ctx, msgs, tools_now, names, act, show, steps, text, max_s
     nmsgs = [{"role": "system", "content": system + "\n\n# Tools\nCall tools with the function-calling API "
               "(you may call several at once). Never write tool calls as text. After tool results, answer the user."},
              *convo]
-    flags = {"fake": False, "cant": False, "role": False, "ground": False}
+    flags = {"fake": False, "cant": False, "role": False, "ground": False, "hes": 0}
     used = len(steps)
     reply = None
+    hint = relevant_tools(text, names)
+    # a clear request for an action / a check, and nothing done yet: the first step must call a tool
+    force = "required" if (not used and hint and ACTION_ASK.search(text or "")) else "auto"
     for step in range(max_steps + 4):
-        reply, calls, amsg, model = await ai.ask_tools(nmsgs, specs)
+        reply, calls, amsg, model = await ai.ask_tools(nmsgs, specs, tool_choice=force)
+        force = "auto"
         if calls and step < max_steps + 2:
             nmsgs.append(amsg)
 
@@ -968,11 +1025,22 @@ async def native_loop(ctx, msgs, tools_now, names, act, show, steps, text, max_s
         if not (reply or "").strip():
             return None
         note = None
-        if not used and not flags["fake"] and FAKE_ACTION.search(reply):
+        hes = HESITATE.search(reply) or (not used and PROMISE.search(reply))
+        if hes and hint and flags["hes"] < 2:
+            # the model hesitated / refused / promised although a fitting tool exists: make it call the tool
+            flags["hes"] += 1
+            note = ("STOP — no excuses. You said you can't / told them to do it themselves / promised to check later, "
+                    f"but you HAVE the tools for this: {', '.join(hint[:5])}. Call the right one now with the correct "
+                    "input, then answer from its result. Don't apologise, don't explain limits.")
+            force = "required"
+        elif not used and not flags["fake"] and FAKE_ACTION.search(reply):
             flags["fake"], note = True, FAKE_ACTION_NOTE
+            force = "required" if hint else "auto"
         elif not flags["cant"] and CANT_RE.search(reply):
             flags["cant"] = True
-            note = CANT_NOTE if (used or any(x.startswith(("📖", "🔎", "📸", "🌐")) for x in steps)) else NO_ACCESS_NOTE
+            note = CANT_NOTE if (used or any(x.startswith(("📖", "🔎", "📸", "🌐", "🧭", "🛒")) for x in steps)) \
+                else NO_ACCESS_NOTE
+            force = "auto" if used else "required"
         elif not flags["role"] and ROLE_SLIP.search(reply):
             flags["role"], note = True, ROLE_NOTE
         elif not flags["ground"]:
@@ -982,7 +1050,7 @@ async def native_loop(ctx, msgs, tools_now, names, act, show, steps, text, max_s
             if bad:
                 flags["ground"], note = True, brain.GROUND_NOTE.format(bad=", ".join(bad))
         if note and step < max_steps + 3:
-            log.info("brain reply re-checked: %s", note[:60])
+            log.info("brain reply re-checked (%s): %s", force, note[:60])
             nmsgs += [{"role": "assistant", "content": reply}, _check(note)]
             continue
         return reply

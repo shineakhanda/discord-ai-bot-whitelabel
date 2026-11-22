@@ -119,7 +119,26 @@ async def crawl(gid, start, limit=MAX_PAGES, progress=None):
         async with sem:
             try:
                 md, title, text = "", "", ""
-                if web.LP["path"]:
+                import browser
+                cards = None
+                if browser.ready():
+                    try:
+                        await web.check_url(u, (80, 443))
+                        data = await asyncio.wait_for(browser.render(u), 60)
+                        title, text = data.get("title") or "", web.squeeze(browser.as_text(data))
+                        md = "\n".join(f"[]({h})" for h in data.get("links") or [])
+                        cards = [(it["name"][:90], it["price"].split(" / ")[0],
+                                  " · ".join(x for x in (f"was {it['old']}" if it.get("old") else "",
+                                                         it.get("stock") or "") if x)[:80])
+                                 for it in data.get("items") or [] if it.get("name") and it.get("price")]
+                    except web.BlockedURL:
+                        raise
+                    except Exception as e:
+                        log.info("site crawl chrome %s: %s", u, str(e)[:80])
+                        text = ""
+                if text:
+                    pass
+                elif web.LP["path"]:
                     try:
                         await web.check_url(u, (80, 443))
                         md = await web._lightpanda(u)
@@ -127,7 +146,9 @@ async def crawl(gid, start, limit=MAX_PAGES, progress=None):
                         raise
                     except Exception:
                         md = ""
-                if md and not web.looks_empty(web.squeeze(md)):
+                if text:
+                    pass
+                elif md and not web.looks_empty(web.squeeze(md)):
                     m = re.search(r"^#\s+(.+)$", md, re.M)
                     title, text = (m.group(1).strip() if m else ""), web.squeeze(md)
                 else:
@@ -138,7 +159,7 @@ async def crawl(gid, start, limit=MAX_PAGES, progress=None):
                 if len(text) > 80:
                     db.execute("INSERT OR REPLACE INTO site_pages VALUES (?, ?, ?, ?, ?, ?)",
                                (gid, u, host, title[:200], text[:15000], time.time()))
-                    items = extract_items(md or text, u)
+                    items = cards if cards else extract_items(md if (md and not cards and "[](" not in md) else text, u)
                     if len(items) == 1 and title:          # a product page: its own title is the product name
                         items = [(title.split("|")[0].strip()[:90], items[0][1], items[0][2])]
                     for name, price, extra in items:

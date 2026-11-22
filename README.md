@@ -4,6 +4,8 @@
 
 A full AI member for Discord servers, under **your own name and personality**:
 - chat in English, Bangla and Banglish, with web search and page reading
+- a real headless Chrome (installs itself): reads React/Next stores with prices and stock, clicks tabs, screenshots
+- vision (Gemma looks at photos and screenshots), embeds (`/embed`), saved staff replies (`/reply`), staff notes, hand-off to staff
 - web data to CSV, and page watching
 - tickets, AI moderation and announcements
 - activities: QOTD, trivia, mini-games, giveaways and polls
@@ -76,12 +78,13 @@ Copy `.env.example` to `.env` and fill in:
 | `NUMES_API_KEY` | optional | numes.ai: free DeepSeek / GLM backups |
 | `SERPER_API_KEY`, `TAVILY_API_KEY` | optional | Better web search. Without them the bot uses DuckDuckGo. |
 | `MEMBERS_INTENT` | optional | `1` turns on welcomes. You also need Server Members Intent on. |
+| `CHROME` | optional | `0` turns off the built-in headless Chrome (low-RAM servers). `CHROME_PATH` uses a Chrome you installed yourself. |
 
 You need at least **one** AI key. If you add more, the bot switches to the next model automatically when one is busy.
 
 ## 4a. Install on a Pterodactyl / Pelican / Reviactyl panel (recommended)
 1. **Create a server** with the **Python Discord Bot** egg (parkervcp/yolks, Python 3.12 or 3.13).
-   - 512 MB RAM is enough to start; 1 GB is comfortable. 2 GB disk.
+   - 1 GB RAM and 2 GB disk recommended (headless Chrome downloads itself on first start, ~400 MB disk). With 512 MB, set `CHROME=0` in `.env`.
 2. **Startup tab:**
 
    | variable | value |

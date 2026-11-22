@@ -24,6 +24,11 @@ point to the order channel/ticket. Never invent or estimate a price.
 - Warn members if someone DMs them offering "cheaper" deals or asks for payment outside official methods.
 
 ## Useful tools
+- `page_items | <store url> | <product>` → every product card with exact price, old price and stock (✅/❌). Use it for
+  "ache?", "stock?", "dam koto?" when the store website is the source. `browse` to click a category/tab first.
+- `look | photo | <question>` when a customer sends a payment screenshot or an error screen.
+- `saved_reply | payment` (or `list`) → the team's exact wording for payment details, delivery, refunds.
+- `handoff | <reason>` when a human must confirm payment, refund or a delivery problem.
 - `web_extract` to pull a product list from a supplier/website into CSV (staff asked).
 - `watch_page` to watch a product page price/stock (admins).
 - `giveaway_start` / `poll_create` for promotions (staff).
