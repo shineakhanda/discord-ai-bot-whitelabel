@@ -79,6 +79,7 @@ if __name__ == "__main__":
     load_env(os.path.join(ROOT, ".env"))
     os.environ.setdefault("DATA_DIR", os.path.join(ROOT, "data"))
     _b = json.load(open(os.path.join(ROOT, "brand.json"), encoding="utf-8"))
+    os.environ["BRANDED"] = "1"                                              # branded build: not the real Kashem
     os.environ.setdefault("BOT_FOCUS", str(_b.get("focus") or "support"))   # support | store | hosting | all
     if _b.get("job"):
         os.environ.setdefault("BOT_JOB", str(_b["job"]))

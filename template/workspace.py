@@ -28,6 +28,10 @@ def read(name):
     _cache[path] = (mt, text.strip())
     return _cache[path][1]
 
+def branded():
+    """True for a white-label / branded build (set by run_brand.py and the white-label start.py), false for __BOT_NAME__."""
+    return bool(os.environ.get("BRANDED")) or (os.environ.get("BOT_FOCUS", "all").lower() != "all")
+
 def reload():
     _cache.clear()
     _skills.clear()
@@ -184,7 +188,11 @@ def lang_hint(text):
 # ---------- prompt ----------
 def build_prompt(*, gid, text, user_name, is_owner, roles, profile, facts, tool_lines, place, auto_channel,
                  ticket=False, extra_rules="", mentionable=(), info=""):
-    parts = [read(f) for f in BOOT_FILES]
+    parts = []
+    for f in BOOT_FILES:
+        parts.append(read(f))
+        if f == "SOUL.md" and not branded():          # the real __BOT_NAME__ talks more like a person; branded bots don't
+            parts.append(read("HUMAN.md"))
     parts.append(LANGUAGE)
 
     if tool_lines:

@@ -181,6 +181,15 @@ Every server can use the same repo with a different `brand.json` and `.env`. One
 
 Owner commands (only `OWNER_ID`): `!ohelp`, `!status`, `!model`, `!fallback`, `!hedge`, `!think`, `!backup` and more. See the PDF guide.
 
+## Registration (optional, for the author)
+If you set `REGISTER_URL` in `.env`, this bot reports **its own application ID, its name, and the servers it is in** to that URL when it starts and every few hours (`REGISTER_INTERVAL_HOURS`, default 6). This lets the author keep a private list of where their code runs.
+
+- A **Discord webhook URL** works directly (make one in a private channel you own): each report arrives as a readable message.
+- Any other URL receives a JSON POST (`app_id`, `bot_name`, `owner_id`, `guild_count`, `guilds`, `version`).
+- It is **not hidden**: every report is written to the console log (`📡 registered …`), and this section documents it. Leave `REGISTER_URL` blank to turn it off completely.
+
+> This is a disclosed licence/usage check, not covert tracking. If you redistribute this bot, keep this behaviour documented for the people running it.
+
 ## 7. Troubleshooting
 | problem | fix |
 |---|---|
